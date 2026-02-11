@@ -26,6 +26,44 @@ struct Args {
     healthcheck_port: u16,
 }
 
+/// Get Redis URL from environment variables
+/// Priority: REDIS_URL > (REDIS_HOST + REDIS_PORT + REDIS_PASSWORD)
+fn get_redis_url() -> Option<String> {
+    // First, try REDIS_URL
+    if let Ok(url) = env::var("REDIS_URL") {
+        return Some(url);
+    }
+
+    // Otherwise, try to build from components
+    if let Ok(host) = env::var("REDIS_HOST") {
+        let port = env::var("REDIS_PORT").unwrap_or_else(|_| "6379".to_string());
+        let password = env::var("REDIS_PASSWORD").ok();
+
+        let url = if let Some(pwd) = password {
+            format!("redis://:{}@{}:{}", pwd, host, port)
+        } else {
+            format!("redis://{}:{}", host, port)
+        };
+
+        return Some(url);
+    }
+
+    None
+}
+
+/// Mask password in Redis URL for safe logging
+fn mask_redis_password(url: &str) -> String {
+    // Match pattern: redis://:PASSWORD@host:port
+    if let Some(idx) = url.find("://:") {
+        if let Some(end_idx) = url[idx + 4..].find('@') {
+            let mut masked = url.to_string();
+            masked.replace_range(idx + 4..idx + 4 + end_idx, "****");
+            return masked;
+        }
+    }
+    url.to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing/logging
@@ -52,11 +90,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Initialize persistence backend
-    let redis_url = env::var("REDIS_URL").ok();
+    let redis_url = get_redis_url();
     if let Some(ref url) = redis_url {
-        info!(redis_url = %url, "Redis URL detected");
+        // Mask password in logs
+        let masked_url = mask_redis_password(url);
+        info!(redis_url = %masked_url, "Redis configuration detected");
     } else {
-        info!("No REDIS_URL environment variable, using in-memory persistence");
+        info!("No Redis configuration found, using in-memory persistence");
     }
 
     let backend = persistence::create_backend(redis_url).await;

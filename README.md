@@ -188,12 +188,29 @@ expected_status = 200
 
 ### Redis Persistence (Optional)
 
-Enable Redis persistence to maintain probe state across restarts:
+Enable Redis persistence to maintain probe state across restarts.
+
+#### Configuration Options
+
+**Option 1: Using REDIS_URL**
+```bash
+export REDIS_URL="redis://localhost:6379"
+# With password:
+export REDIS_URL="redis://:mypassword@localhost:6379"
+```
+
+**Option 2: Using separate environment variables**
+```bash
+export REDIS_HOST="localhost"
+export REDIS_PORT="6379"           # Optional, defaults to 6379
+export REDIS_PASSWORD="mypassword" # Optional
+```
+
+**Priority**: `REDIS_URL` takes precedence over individual variables.
+
+#### Building and Running
 
 ```bash
-# Set Redis URL environment variable
-export REDIS_URL="redis://localhost:6379"
-
 # Build with Redis support
 cargo build --release --features redis-persistence
 
@@ -201,9 +218,11 @@ cargo build --release --features redis-persistence
 ./target/release/poc-sonde
 ```
 
-**Without Redis URL**: The application uses in-memory persistence (state is lost on restart).
+#### Behavior
 
-**With Redis URL**: Probe states are persisted to Redis:
+**Without Redis configuration**: The application uses in-memory persistence (state is lost on restart).
+
+**With Redis configuration**: Probe states are persisted to Redis:
 - Last execution timestamp
 - Success/failure status
 - Next scheduled execution time
@@ -213,6 +232,28 @@ cargo build --release --features redis-persistence
 - No duplicate checks immediately after restart
 - Maintains retry schedules across deployments
 - Enables horizontal scaling (future feature)
+
+#### Examples
+
+```bash
+# Development: Local Redis without password
+export REDIS_HOST="localhost"
+./target/release/poc-sonde
+
+# Production: Redis with authentication
+export REDIS_HOST="redis.example.com"
+export REDIS_PORT="6379"
+export REDIS_PASSWORD="prod-secret-password"
+./target/release/poc-sonde
+
+# Docker/Kubernetes: Using REDIS_URL
+export REDIS_URL="redis://:${REDIS_PASS}@redis-service:6379"
+./target/release/poc-sonde
+
+# Cloud Redis (e.g., AWS ElastiCache, Google Cloud Memorystore)
+export REDIS_URL="redis://my-redis.abc123.cache.amazonaws.com:6379"
+./target/release/poc-sonde
+```
 
 ### Configuring Log Levels
 
