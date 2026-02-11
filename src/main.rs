@@ -1,10 +1,12 @@
 mod config;
 mod executor;
 mod healthcheck;
+mod persistence;
 mod probe;
 mod scheduler;
 
 use clap::Parser;
+use std::env;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -49,6 +51,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Configuration loaded successfully"
     );
 
+    // Initialize persistence backend
+    let redis_url = env::var("REDIS_URL").ok();
+    if let Some(ref url) = redis_url {
+        info!(redis_url = %url, "Redis URL detected");
+    } else {
+        info!("No REDIS_URL environment variable, using in-memory persistence");
+    }
+
+    let backend = persistence::create_backend(redis_url).await;
+
     // Spawn health check server if enabled
     if args.healthcheck {
         info!(
@@ -73,7 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Spawning probe task"
         );
 
-        let handle = tokio::spawn(scheduler::schedule_probe(probe));
+        let backend_clone = backend.clone();
+        let handle = tokio::spawn(scheduler::schedule_probe(probe, backend_clone));
         handles.push(handle);
     }
 

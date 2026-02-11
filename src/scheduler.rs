@@ -1,34 +1,83 @@
 use crate::config::Probe;
 use crate::executor;
+use crate::persistence::{self, PersistenceBackend, ProbeState};
 use crate::probe;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
-pub async fn schedule_probe(probe: Probe) {
-    let interval = Duration::from_secs(probe.interval_seconds);
-    let mut interval_timer = time::interval(interval);
-
+pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) {
     info!(
         probe_name = %probe.name,
         interval_seconds = probe.interval_seconds,
+        delay_after_success = probe.delay_after_success_seconds,
+        delay_after_failure = probe.delay_after_failure_seconds,
         "Starting probe scheduler"
     );
 
+    // Load previous state if exists
+    let mut next_delay = match backend.load_state(&probe.name).await {
+        Ok(Some(state)) => {
+            let now = persistence::current_timestamp();
+            if state.next_check_timestamp > now {
+                let remaining = state.next_check_timestamp - now;
+                info!(
+                    probe_name = %probe.name,
+                    remaining_seconds = remaining,
+                    last_success = state.last_check_success,
+                    "Resuming from saved state"
+                );
+                remaining
+            } else {
+                info!(
+                    probe_name = %probe.name,
+                    "Saved state expired, starting immediately"
+                );
+                0
+            }
+        }
+        Ok(None) => {
+            info!(
+                probe_name = %probe.name,
+                "No previous state found, starting immediately"
+            );
+            0
+        }
+        Err(e) => {
+            error!(
+                probe_name = %probe.name,
+                error = %e,
+                "Failed to load state, starting immediately"
+            );
+            0
+        }
+    };
+
     loop {
-        interval_timer.tick().await;
+        // Wait for the calculated delay
+        if next_delay > 0 {
+            debug!(
+                probe_name = %probe.name,
+                delay_seconds = next_delay,
+                "Waiting before next execution"
+            );
+            time::sleep(Duration::from_secs(next_delay)).await;
+        }
 
         info!(
             probe_name = %probe.name,
             "Executing scheduled probe"
         );
 
-        match probe::execute_probe(&probe).await {
+        let check_timestamp = persistence::current_timestamp();
+        let success = match probe::execute_probe(&probe).await {
             Ok(_) => {
                 info!(
                     probe_name = %probe.name,
                     "Probe succeeded"
                 );
+                true
             }
             Err(failure) => {
                 error!(
@@ -69,7 +118,38 @@ pub async fn schedule_probe(probe: Probe) {
                         }
                     }
                 }
+                false
             }
+        };
+
+        // Calculate next delay based on success/failure
+        next_delay = if success {
+            probe.get_delay_after_success()
+        } else {
+            probe.get_delay_after_failure()
+        };
+
+        // Save state
+        let state = ProbeState {
+            probe_name: probe.name.clone(),
+            last_check_timestamp: check_timestamp,
+            last_check_success: success,
+            next_check_timestamp: check_timestamp + next_delay,
+        };
+
+        if let Err(e) = backend.save_state(&state).await {
+            error!(
+                probe_name = %probe.name,
+                error = %e,
+                "Failed to save state"
+            );
         }
+
+        debug!(
+            probe_name = %probe.name,
+            next_delay_seconds = next_delay,
+            success = success,
+            "Scheduled next execution"
+        );
     }
 }

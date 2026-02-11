@@ -261,6 +261,8 @@ mod tests {
             },
             on_failure_command: None,
             command_timeout_seconds: 30,
+            delay_after_success_seconds: None,
+            delay_after_failure_seconds: None,
         };
 
         let result = execute_probe(&probe).await;

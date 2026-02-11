@@ -17,6 +17,20 @@ pub struct Probe {
     pub on_failure_command: Option<String>,
     #[serde(default = "default_timeout")]
     pub command_timeout_seconds: u64,
+    /// Delay in seconds before next execution after a successful check (defaults to interval_seconds)
+    pub delay_after_success_seconds: Option<u64>,
+    /// Delay in seconds before next execution after a failed check (defaults to interval_seconds)
+    pub delay_after_failure_seconds: Option<u64>,
+}
+
+impl Probe {
+    pub fn get_delay_after_success(&self) -> u64 {
+        self.delay_after_success_seconds.unwrap_or(self.interval_seconds)
+    }
+
+    pub fn get_delay_after_failure(&self) -> u64 {
+        self.delay_after_failure_seconds.unwrap_or(self.interval_seconds)
+    }
 }
 
 fn default_timeout() -> u64 {

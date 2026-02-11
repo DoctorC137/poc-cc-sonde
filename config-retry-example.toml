@@ -1,0 +1,38 @@
+# Example configuration showing retry strategies with different delays
+# This demonstrates the new delay_after_success_seconds and delay_after_failure_seconds features
+
+# Example 1: Fast retry on failure
+[[probes]]
+name = "Critical API - Fast Retry"
+url = "https://httpbin.org/status/200"
+interval_seconds = 300  # Normal interval: 5 minutes
+delay_after_success_seconds = 300  # Wait 5 minutes after success
+delay_after_failure_seconds = 30   # Retry after 30 seconds on failure
+on_failure_command = "echo 'Critical API failed, retrying in 30s'"
+
+[probes.checks]
+expected_status = 200
+
+# Example 2: Exponential backoff simulation
+[[probes]]
+name = "Secondary Service"
+url = "https://httpbin.org/get"
+interval_seconds = 120  # Normal interval: 2 minutes
+delay_after_success_seconds = 120  # Wait 2 minutes after success
+delay_after_failure_seconds = 300  # Wait 5 minutes after failure (longer backoff)
+
+[probes.checks]
+expected_status = 200
+expected_body_contains = "httpbin.org"
+
+# Example 3: Different behavior for monitoring and alerting
+[[probes]]
+name = "Database Health"
+url = "https://httpbin.org/delay/1"
+interval_seconds = 60   # Normal check every minute
+delay_after_success_seconds = 60   # Continue checking every minute when healthy
+delay_after_failure_seconds = 10   # Check every 10 seconds when unhealthy
+on_failure_command = "echo 'Database unhealthy, monitoring closely'"
+
+[probes.checks]
+expected_status = 200

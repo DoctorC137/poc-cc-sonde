@@ -32,8 +32,15 @@ cd poc-sonde
 # Build in release mode for optimal performance
 cargo build --release
 
+# Build with Redis persistence support
+cargo build --release --features redis-persistence
+
 # The binary will be available at ./target/release/poc-sonde
 ```
+
+**Features:**
+- Default build: In-memory persistence (no external dependencies)
+- `redis-persistence`: Enables Redis-based state persistence for production deployments
 
 ## Configuration
 
@@ -79,9 +86,11 @@ expected_body_regex = "\"version\":\\s*\"\\d+\\.\\d+\\.\\d+\""
 
 - `name` (required): A descriptive name for the probe
 - `url` (required): The HTTP endpoint to monitor
-- `interval_seconds` (required): How often to run the probe (in seconds)
+- `interval_seconds` (required): Default interval for running the probe (in seconds)
 - `on_failure_command` (optional): Shell command to execute when checks fail
 - `command_timeout_seconds` (optional): Timeout for command execution (default: 30)
+- `delay_after_success_seconds` (optional): Delay before next execution after successful check (defaults to `interval_seconds`)
+- `delay_after_failure_seconds` (optional): Delay before next execution after failed check (defaults to `interval_seconds`)
 
 #### Check Types
 
@@ -154,6 +163,56 @@ This endpoint can be used to monitor the health of the monitoring application it
 curl http://localhost:8080
 # Output: Probe is running
 ```
+
+### Retry Strategies
+
+Configure different delays after success or failure to implement retry strategies:
+
+```toml
+[[probes]]
+name = "Critical API"
+url = "https://api.example.com/health"
+interval_seconds = 300              # Default interval (5 minutes)
+delay_after_success_seconds = 300   # Continue checking every 5 minutes when healthy
+delay_after_failure_seconds = 30    # Fast retry: check every 30 seconds when unhealthy
+on_failure_command = "echo 'API down, checking every 30s'"
+
+[probes.checks]
+expected_status = 200
+```
+
+**Use cases:**
+- **Fast failure detection**: Set short `delay_after_failure_seconds` to quickly detect recovery
+- **Reduced load when healthy**: Set longer `delay_after_success_seconds` to reduce monitoring overhead
+- **Exponential backoff**: Increase `delay_after_failure_seconds` to avoid overwhelming failing services
+
+### Redis Persistence (Optional)
+
+Enable Redis persistence to maintain probe state across restarts:
+
+```bash
+# Set Redis URL environment variable
+export REDIS_URL="redis://localhost:6379"
+
+# Build with Redis support
+cargo build --release --features redis-persistence
+
+# Run the application
+./target/release/poc-sonde
+```
+
+**Without Redis URL**: The application uses in-memory persistence (state is lost on restart).
+
+**With Redis URL**: Probe states are persisted to Redis:
+- Last execution timestamp
+- Success/failure status
+- Next scheduled execution time
+- On restart, probes resume from their saved state
+
+**Benefits:**
+- No duplicate checks immediately after restart
+- Maintains retry schedules across deployments
+- Enables horizontal scaling (future feature)
 
 ### Configuring Log Levels
 

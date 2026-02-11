@@ -10,6 +10,10 @@ interval_seconds = 60
 on_failure_command = "echo 'API health check failed'"
 # Optional: timeout for command execution (default: 30 seconds)
 command_timeout_seconds = 30
+# Optional: delay after successful check (defaults to interval_seconds)
+delay_after_success_seconds = 120
+# Optional: delay after failed check for faster retry (defaults to interval_seconds)
+delay_after_failure_seconds = 10
 
 [probes.checks]
 # Check that the response status is 200
