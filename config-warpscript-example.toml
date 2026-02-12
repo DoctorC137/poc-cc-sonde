@@ -1,7 +1,7 @@
 # Example configuration for WarpScript-based auto-scaling probes
-# Requires environment variables:
+# Requires environment variable:
 # - WARP_ENDPOINT: URL of Warp API (e.g., https://warp.example.com/api/v0/exec)
-# - WARP_TOKEN: Authentication token for Warp
+# - WARP_TOKEN: (optional) Fallback token for apps without warp_token configured
 
 # Example 1: CPU-based auto-scaling with 3 levels and custom tokens per app
 [[warpscript_probes]]
@@ -15,11 +15,11 @@ delay_after_scale_seconds = 120  # Wait 2 minutes after scaling before next chec
 # Define apps with optional custom warp_token
 [[warpscript_probes.apps]]
 id = "app_frontend"
-warp_token = "READ_TOKEN_FOR_FRONTEND"  # Optional: custom token for this app
+warp_token = "READ_TOKEN_FOR_FRONTEND"  # Custom token for this app
 
 [[warpscript_probes.apps]]
 id = "app_backend"
-# warp_token not specified: will use WARP_TOKEN env var
+# No warp_token: will use WARP_TOKEN env var as fallback
 
 # Level 1: Minimum scale (1 replica)
 [[warpscript_probes.levels]]

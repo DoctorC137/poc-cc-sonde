@@ -235,11 +235,16 @@ Monitor metrics from Warp 10 and automatically scale your applications based on 
 
 #### Prerequisites
 
-Set the following environment variables:
+Set the required environment variable:
 ```bash
+# Required: Warp API endpoint
 export WARP_ENDPOINT="https://warp.example.com/api/v0/exec"
+
+# Optional: Default Warp token (fallback for apps without warp_token)
 export WARP_TOKEN="YOUR_READ_TOKEN"
 ```
+
+**Note:** Each app can have its own `warp_token` in the configuration. If an app doesn't specify `warp_token`, it will use the `WARP_TOKEN` environment variable as fallback.
 
 #### Configuration Example
 
@@ -292,7 +297,7 @@ downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 
 **App Configuration:**
 - `id` (required): Application identifier
-- `warp_token` (optional): Custom Warp token for this app (overrides WARP_TOKEN env var)
+- `warp_token` (optional): Warp read token for this app (uses WARP_TOKEN env var if not specified)
 
 **Level Configuration:**
 - `level` (required): Level number (1, 2, 3, etc.) - must be unique and ordered

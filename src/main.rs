@@ -9,7 +9,7 @@ mod warpscript_scheduler;
 
 use clap::Parser;
 use std::env;
-use tracing::{error, info};
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -94,22 +94,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check WarpScript environment variables if WarpScript probes are configured
     if !config.warpscript_probes.is_empty() {
-        match (env::var("WARP_ENDPOINT"), env::var("WARP_TOKEN")) {
-            (Ok(endpoint), Ok(_)) => {
-                info!(
-                    warp_endpoint = %endpoint,
-                    "WarpScript environment configured"
-                );
-            }
-            (Err(_), _) => {
-                error!("WARP_ENDPOINT environment variable not set, but WarpScript probes are configured");
-                return Err("Missing WARP_ENDPOINT environment variable".into());
-            }
-            (_, Err(_)) => {
-                error!("WARP_TOKEN environment variable not set, but WarpScript probes are configured");
-                return Err("Missing WARP_TOKEN environment variable".into());
-            }
-        }
+        // WARP_ENDPOINT is always required
+        let endpoint = env::var("WARP_ENDPOINT")
+            .map_err(|_| "WARP_ENDPOINT environment variable not set, but WarpScript probes are configured")?;
+
+        info!(
+            warp_endpoint = %endpoint,
+            "WarpScript environment configured"
+        );
     }
 
     // Initialize persistence backend

@@ -17,7 +17,7 @@ impl std::fmt::Display for WarpScriptError {
         match self {
             WarpScriptError::FileReadError(e) => write!(f, "Failed to read WarpScript file: {}", e),
             WarpScriptError::MissingEndpoint => write!(f, "WARP_ENDPOINT environment variable not set"),
-            WarpScriptError::MissingToken => write!(f, "WARP_TOKEN environment variable not set"),
+            WarpScriptError::MissingToken => write!(f, "warp_token not configured for this app and WARP_TOKEN environment variable not set"),
             WarpScriptError::RequestError(e) => write!(f, "Warp API request failed: {}", e),
             WarpScriptError::ParseError(e) => write!(f, "Failed to parse Warp response: {}", e),
             WarpScriptError::NoScalarValue => write!(f, "No scalar value returned from WarpScript"),
@@ -38,7 +38,7 @@ pub async fn execute_warpscript(
     let endpoint = env::var("WARP_ENDPOINT")
         .map_err(|_| WarpScriptError::MissingEndpoint)?;
 
-    // Use custom token if provided, otherwise read from env var
+    // Use custom token if provided, otherwise fallback to WARP_TOKEN env var
     let token = if let Some(t) = custom_token {
         t.to_string()
     } else {
