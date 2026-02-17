@@ -86,6 +86,24 @@ interval_seconds = 120
 [healthcheck_probes.checks]
 expected_status = 200
 expected_body_regex = "\"version\":\\s*\"\\d+\\.\\d+\\.\\d+\""
+
+# Monitor multiple apps with the same configuration
+[[healthcheck_probes]]
+name = "App Monitor"
+interval_seconds = 60
+on_failure_command = "clever restart --app ${APP_ID}"
+failure_retries_before_command = 1
+
+[healthcheck_probes.checks]
+expected_status = 200
+
+[[healthcheck_probes.apps]]
+id = "app_frontend"
+url = "https://frontend.example.com/health"
+
+[[healthcheck_probes.apps]]
+id = "app_backend"
+url = "https://backend.example.com/health"
 ```
 
 ### Configuration Parameters
@@ -93,13 +111,20 @@ expected_body_regex = "\"version\":\\s*\"\\d+\\.\\d+\\.\\d+\""
 #### Probe Configuration
 
 - `name` (required): A descriptive name for the probe
-- `url` (required): The HTTP endpoint to monitor
+- `url` (optional): The HTTP endpoint to monitor — required if `apps` is not specified
+- `apps` (optional): List of applications to monitor — required if `url` is not specified
 - `interval_seconds` (required): Default interval for running the probe (in seconds)
-- `on_failure_command` (optional): Shell command to execute when checks fail
+- `on_failure_command` (optional): Shell command to execute when checks fail (supports `${APP_ID}`, `&&`, pipes)
 - `command_timeout_seconds` (optional): Timeout for command execution (default: 30)
 - `delay_after_success_seconds` (optional): Delay before next execution after successful check (defaults to `interval_seconds`)
 - `delay_after_failure_seconds` (optional): Delay before next execution after failed check (defaults to `interval_seconds`)
 - `failure_retries_before_command` (optional): Number of consecutive failures before executing the failure command (default: 0 = execute immediately)
+
+**Note:** `url` and `apps` are mutually exclusive. Use `url` for a single endpoint, `apps` to monitor multiple apps with the same configuration.
+
+**App Configuration:**
+- `id` (required): Application identifier — substituted as `${APP_ID}` in `on_failure_command`
+- `url` (required): Health check URL for this specific app
 
 #### Check Types
 
@@ -109,6 +134,8 @@ At least one check must be configured for each probe:
 - `expected_body_contains`: String that must be present in response body
 - `expected_body_regex`: Regex pattern that must match the response body
 - `expected_header`: Key-value pairs of expected HTTP headers
+
+The same checks apply to all apps within a probe.
 
 All configured checks must pass for the probe to succeed.
 
@@ -625,6 +652,23 @@ If commands are timing out:
 - HTTP requests have a 30-second timeout
 - Shell commands respect the configured timeout
 - The application is designed to handle dozens of probes concurrently
+
+## Command Execution
+
+All commands (`on_failure_command`, `upscale_command`, `downscale_command`) are executed via `sh -c`, which means:
+- Shell operators are supported: `&&`, `||`, `;`, pipes (`|`)
+- `${APP_ID}` is substituted with the app identifier before execution
+
+```toml
+# Simple command
+on_failure_command = "clever restart --app ${APP_ID}"
+
+# Chained commands with &&
+on_failure_command = "clever scale --app ${APP_ID} --flavor S && clever restart --app ${APP_ID}"
+
+# With pipe
+on_failure_command = "echo 'Alert' | mail -s 'App down' ops@example.com"
+```
 
 ## Security Notes
 
