@@ -10,7 +10,7 @@ pub async fn execute_command(
     info!(
         command = %command,
         timeout_seconds = timeout_seconds,
-        "Executing failure command"
+        "Executing command"
     );
 
     if command.trim().is_empty() {
