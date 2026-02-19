@@ -13,6 +13,8 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
         interval_seconds = probe.interval_seconds,
         delay_after_success = probe.delay_after_success_seconds,
         delay_after_failure = probe.delay_after_failure_seconds,
+        delay_after_command_success = probe.delay_after_command_success_seconds,
+        delay_after_command_failure = probe.delay_after_command_failure_seconds,
         "Starting probe scheduler"
     );
 
@@ -72,7 +74,7 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
         );
 
         let check_timestamp = persistence::current_timestamp();
-        let success = match probe::execute_probe(&probe).await {
+        let (success, command_executed, command_succeeded) = match probe::execute_probe(&probe).await {
             Ok(_) => {
                 info!(
                     probe_name = %probe.name,
@@ -80,7 +82,7 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
                 );
                 // Reset consecutive failures on success
                 consecutive_failures = 0;
-                true
+                (true, false, false)
             }
             Err(failure) => {
                 // Increment consecutive failures
@@ -93,11 +95,16 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
                     "Probe failed"
                 );
 
+                let mut command_executed = false;
+                let mut command_succeeded = false;
+
                 // Execute failure command if configured and threshold reached
                 if let Some(ref command) = probe.on_failure_command {
                     let retry_threshold = probe.get_failure_retries_before_command();
 
                     if consecutive_failures > retry_threshold {
+                        command_executed = true;
+
                         // Substitute ${APP_ID} if an app is configured
                         let app_id = probe.apps.first().map(|a| a.id.as_str());
                         let command = if let Some(id) = app_id {
@@ -117,6 +124,7 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
                         match executor::execute_command(&command, probe.command_timeout_seconds).await {
                             Ok(output) => {
                                 if output.status.success() {
+                                    command_succeeded = true;
                                     info!(
                                         probe_name = %probe.name,
                                         "Failure command completed successfully"
@@ -147,13 +155,19 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
                         );
                     }
                 }
-                false
+                (false, command_executed, command_succeeded)
             }
         };
 
-        // Calculate next delay based on success/failure
+        // Calculate next delay based on success/failure and command execution
         next_delay = if success {
             probe.get_delay_after_success()
+        } else if command_executed {
+            if command_succeeded {
+                probe.get_delay_after_command_success()
+            } else {
+                probe.get_delay_after_command_failure()
+            }
         } else {
             probe.get_delay_after_failure()
         };

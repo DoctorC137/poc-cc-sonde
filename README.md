@@ -118,6 +118,8 @@ url = "https://backend.example.com/health"
 - `command_timeout_seconds` (optional): Timeout for command execution (default: 30)
 - `delay_after_success_seconds` (optional): Delay before next execution after successful check (defaults to `interval_seconds`)
 - `delay_after_failure_seconds` (optional): Delay before next execution after failed check (defaults to `interval_seconds`)
+- `delay_after_command_success_seconds` (optional): Delay before next execution after failure command succeeds (defaults to `delay_after_failure_seconds`)
+- `delay_after_command_failure_seconds` (optional): Delay before next execution after failure command fails (defaults to `delay_after_failure_seconds`)
 - `failure_retries_before_command` (optional): Number of consecutive failures before executing the failure command (default: 0 = execute immediately)
 
 **Note:** `url` and `apps` are mutually exclusive. Use `url` for a single endpoint, `apps` to monitor multiple apps with the same configuration.
@@ -211,7 +213,7 @@ url = "https://api.example.com/health"
 interval_seconds = 300              # Default interval (5 minutes)
 delay_after_success_seconds = 300   # Continue checking every 5 minutes when healthy
 delay_after_failure_seconds = 30    # Fast retry: check every 30 seconds when unhealthy
-on_failure_command = "echo 'API down, checking every 30s'"
+on_failure_command = "systemctl restart myservice"
 
 [healthcheck_probes.checks]
 expected_status = 200
@@ -221,6 +223,35 @@ expected_status = 200
 - **Fast failure detection**: Set short `delay_after_failure_seconds` to quickly detect recovery
 - **Reduced load when healthy**: Set longer `delay_after_success_seconds` to reduce monitoring overhead
 - **Exponential backoff**: Increase `delay_after_failure_seconds` to avoid overwhelming failing services
+
+### Delays After Command Execution
+
+Control delays specifically after the failure command executes:
+
+```toml
+[[healthcheck_probes]]
+name = "Self-Healing Service"
+url = "https://api.example.com/health"
+interval_seconds = 60
+delay_after_failure_seconds = 10             # Retry quickly when unhealthy
+delay_after_command_success_seconds = 120    # Wait 2 min after successful restart
+delay_after_command_failure_seconds = 30     # Wait 30s if restart fails
+failure_retries_before_command = 2
+on_failure_command = "systemctl restart myservice"
+
+[healthcheck_probes.checks]
+expected_status = 200
+```
+
+**How it works:**
+- Check fails → retries every `delay_after_failure_seconds` until threshold reached
+- Command executes and **succeeds** → wait `delay_after_command_success_seconds` before next check
+- Command executes and **fails** → wait `delay_after_command_failure_seconds` before next check
+
+**Use cases:**
+- **Service stabilization**: Give the service more time to restart after successful command execution
+- **Avoid restart loops**: Use shorter delay after command failure to quickly verify if manual intervention is needed
+- **Resource optimization**: Longer delays after restart to allow warmup time
 
 ### Failure Retry Threshold
 

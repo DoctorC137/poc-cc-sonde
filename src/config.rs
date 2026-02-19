@@ -24,6 +24,10 @@ pub struct Probe {
     pub delay_after_success_seconds: Option<u64>,
     /// Delay in seconds before next execution after a failed check (defaults to interval_seconds)
     pub delay_after_failure_seconds: Option<u64>,
+    /// Delay in seconds before next execution after command succeeds (defaults to delay_after_failure_seconds)
+    pub delay_after_command_success_seconds: Option<u64>,
+    /// Delay in seconds before next execution after command fails (defaults to delay_after_failure_seconds)
+    pub delay_after_command_failure_seconds: Option<u64>,
     /// Number of consecutive failures before executing the failure command (defaults to 0 = execute immediately)
     pub failure_retries_before_command: Option<u32>,
     /// Applications to monitor (each app creates an independent probe instance)
@@ -46,6 +50,16 @@ impl Probe {
 
     pub fn get_delay_after_failure(&self) -> u64 {
         self.delay_after_failure_seconds.unwrap_or(self.interval_seconds)
+    }
+
+    pub fn get_delay_after_command_success(&self) -> u64 {
+        self.delay_after_command_success_seconds
+            .unwrap_or_else(|| self.get_delay_after_failure())
+    }
+
+    pub fn get_delay_after_command_failure(&self) -> u64 {
+        self.delay_after_command_failure_seconds
+            .unwrap_or_else(|| self.get_delay_after_failure())
     }
 
     pub fn get_failure_retries_before_command(&self) -> u32 {
