@@ -1,9 +1,9 @@
 mod config;
 mod executor;
 mod healthcheck;
+mod healthcheck_probe;
+mod healthcheck_scheduler;
 mod persistence;
-mod probe;
-mod scheduler;
 mod warpscript_probe;
 mod warpscript_scheduler;
 
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let backend_clone = backend.clone();
-            let handle = tokio::spawn(scheduler::schedule_probe(probe, backend_clone));
+            let handle = tokio::spawn(healthcheck_scheduler::schedule_probe(probe, backend_clone));
             handles.push(handle);
         } else {
             // With apps: create one probe instance per app
@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let backend_clone = backend.clone();
-                let handle = tokio::spawn(scheduler::schedule_probe(probe_instance, backend_clone));
+                let handle = tokio::spawn(healthcheck_scheduler::schedule_probe(probe_instance, backend_clone));
                 handles.push(handle);
             }
         }

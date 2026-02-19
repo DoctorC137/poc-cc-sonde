@@ -1,7 +1,7 @@
 use crate::config::Probe;
 use crate::executor;
+use crate::healthcheck_probe;
 use crate::persistence::{self, PersistenceBackend, ProbeState};
-use crate::probe;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -74,7 +74,7 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
         );
 
         let check_timestamp = persistence::current_timestamp();
-        let (success, command_executed, command_succeeded) = match probe::execute_probe(&probe).await {
+        let (success, command_executed, command_succeeded) = match healthcheck_probe::execute_probe(&probe).await {
             Ok(_) => {
                 info!(
                     probe_name = %probe.name,
