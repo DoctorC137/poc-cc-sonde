@@ -150,10 +150,10 @@ All configured checks must pass for the probe to succeed.
 cargo run --release
 
 # Or specify a custom configuration file
-cargo run --release -- /path/to/config.toml
+cargo run --release -- --config /path/to/config.toml
 
 # Or run the compiled binary directly
-./target/release/poc-sonde config.toml
+./target/release/poc-sonde --config config.toml
 
 # Enable health check endpoint on default port 8080
 ./target/release/poc-sonde --healthcheck
@@ -162,18 +162,17 @@ cargo run --release -- /path/to/config.toml
 ./target/release/poc-sonde --healthcheck --healthcheck-port 9090
 
 # Combine with custom config
-./target/release/poc-sonde myconfig.toml --healthcheck --healthcheck-port 3000
+./target/release/poc-sonde --config myconfig.toml --healthcheck --healthcheck-port 3000
 ```
 
 ### Command Line Options
 
 ```
-Usage: poc-sonde [OPTIONS] [CONFIG]
-
-Arguments:
-  [CONFIG]  Configuration file path [default: config.toml]
+Usage: poc-sonde [OPTIONS]
 
 Options:
+      --config <CONFIG>
+          Configuration file path [default: config.toml]
       --healthcheck
           Enable health check HTTP server
       --healthcheck-port <HEALTHCHECK_PORT>

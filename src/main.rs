@@ -16,7 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Configuration file path
-    #[arg(default_value = "config.toml")]
+    #[arg(long, default_value = "config.toml")]
     config: String,
 
     /// Enable health check HTTP server
