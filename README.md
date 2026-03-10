@@ -1,28 +1,32 @@
-# POC Sonde - HTTP Monitoring Application
+# cc-sonde - HTTP Monitoring & Auto-Scaling Application
 
-A Rust-based HTTP monitoring application that periodically checks HTTP endpoints and executes shell commands when checks fail.
+A Rust-based monitoring application that periodically checks HTTP endpoints and executes shell commands on failure, and optionally drives level-based auto-scaling from Warp 10 metrics.
 
 ## Features
 
 - **Periodic HTTP Monitoring**: Configure multiple probes with custom intervals
-- **Flexible Checks**: Support for multiple verification methods:
+- **Flexible Checks**: Multiple verification methods per probe:
   - HTTP status code validation
-  - Response body content matching (substring)
-  - Response body regex pattern matching
+  - Response body substring match
+  - Response body regex pattern match
   - HTTP header validation
-- **WarpScript Probes**: Execute WarpScript queries and monitor scalar values with level-based auto-scaling
-  - Multi-level scaling (1, 2, 3, ...N levels)
+- **WarpScript Probes**: Execute WarpScript queries and auto-scale based on numeric thresholds
+  - Multi-level scaling (1, 2, 3, …N levels)
   - Automatic level transitions based on metric thresholds
-  - Execute scale up/down commands per level
-  - Manage multiple applications with a single configuration (apps)
-  - Custom Warp token per application
-  - Token and app ID substitution in WarpScript and commands
+  - `levels = [N, M, ...]` shorthand to share identical config across multiple levels
+  - Execute scale-up/scale-down commands per level
+  - Manage multiple applications with a single configuration block
+  - Optional per-app Warp token
+  - `${APP_ID}` and `${WARP_TOKEN}` substitution in WarpScript files and commands
   - Each app instance maintains independent state
 - **Failure Actions**: Execute shell commands when checks fail
-- **Concurrent Execution**: Run multiple probes simultaneously
-- **Health Check Endpoint**: Optional HTTP server for monitoring the application itself
-- **Structured Logging**: Detailed logging with configurable levels
-- **TOML Configuration**: Simple, human-readable configuration format
+- **Retry Threshold**: Require N consecutive failures before triggering the failure command
+- **Configurable Delays**: Different wait times after success, failure, command success, command failure
+- **Concurrent Execution**: All probes run as independent async tasks
+- **Health Check Endpoint**: Optional HTTP server to expose the application's own liveness
+- **State Persistence**: In-memory (default) or Redis-backed persistence across restarts
+- **Structured Logging**: Configurable log levels via `RUST_LOG`
+- **TOML Configuration**: Human-readable configuration format
 
 ## Installation
 
@@ -34,25 +38,71 @@ A Rust-based HTTP monitoring application that periodically checks HTTP endpoints
 ### Building from Source
 
 ```bash
-# Clone or navigate to the repository
-cd poc-sonde
+cd cc-sonde
 
-# Build in release mode for optimal performance
+# Default build (in-memory persistence)
 cargo build --release
 
-# Build with Redis persistence support
+# With Redis persistence support
 cargo build --release --features redis-persistence
 
-# The binary will be available at ./target/release/poc-sonde
+# The binary is at ./target/release/cc-sonde
 ```
 
-**Features:**
-- Default build: In-memory persistence (no external dependencies)
-- `redis-persistence`: Enables Redis-based state persistence for production deployments
+## Usage
+
+```bash
+# Default: reads config.toml in the current directory
+./target/release/cc-sonde
+
+# Custom config file
+./target/release/cc-sonde --config /path/to/config.toml
+
+# With built-in liveness endpoint (default port 8080)
+./target/release/cc-sonde --healthcheck
+
+# Custom port
+./target/release/cc-sonde --healthcheck --healthcheck-port 9090
+
+# Full example
+./target/release/cc-sonde --config myconfig.toml --healthcheck --healthcheck-port 3000
+```
+
+### Command-Line Options
+
+```
+Usage: cc-sonde [OPTIONS]
+
+Options:
+      --config <CONFIG>
+          Configuration file path [default: config.toml]
+      --healthcheck
+          Enable health check HTTP server
+      --healthcheck-port <HEALTHCHECK_PORT>
+          Port for health check server (requires --healthcheck) [default: 8080]
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
+
+### Health Check Endpoint
+
+When `--healthcheck` is enabled, the application starts an HTTP server that answers all requests with:
+
+- **Status**: 200 OK
+- **Body**: `Probe is running`
+
+Useful for meta-monitoring the monitoring application itself.
+
+```bash
+curl http://localhost:8080
+# Probe is running
+```
 
 ## Configuration
 
-Create a `config.toml` file with your probe configurations. See the example below:
+### Healthcheck Probes
 
 ```toml
 [[healthcheck_probes]]
@@ -60,34 +110,52 @@ name = "API Health Check"
 url = "https://api.example.com/health"
 interval_seconds = 60
 on_failure_command = "systemctl restart my-service"
-command_timeout_seconds = 30  # Optional, defaults to 30
+command_timeout_seconds = 30          # Optional, default: 30
+delay_after_success_seconds = 300     # Optional, default: interval_seconds
+delay_after_failure_seconds = 30      # Optional, default: interval_seconds
+delay_after_command_success_seconds = 120  # Optional, default: delay_after_failure_seconds
+delay_after_command_failure_seconds = 30   # Optional, default: delay_after_failure_seconds
+failure_retries_before_command = 3    # Optional, default: 0
 
 [healthcheck_probes.checks]
 expected_status = 200
 expected_body_contains = "\"status\":\"ok\""
+```
 
-[[healthcheck_probes]]
-name = "Service with Header Check"
-url = "https://service.example.com/status"
-interval_seconds = 30
+#### Parameters
 
-[healthcheck_probes.checks]
-expected_status = 200
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `name` | yes | — | Descriptive name for the probe |
+| `url` | yes* | — | HTTP endpoint to monitor (*required if `apps` not set) |
+| `apps` | yes* | — | List of apps to monitor (*required if `url` not set) |
+| `interval_seconds` | yes | — | Default interval between runs |
+| `on_failure_command` | no | — | Shell command executed when a check fails |
+| `command_timeout_seconds` | no | `30` | Max execution time for the failure command |
+| `delay_after_success_seconds` | no | `interval_seconds` | Wait time after a successful check |
+| `delay_after_failure_seconds` | no | `interval_seconds` | Wait time after a failed check |
+| `delay_after_command_success_seconds` | no | `delay_after_failure_seconds` | Wait time after the failure command succeeds |
+| `delay_after_command_failure_seconds` | no | `delay_after_failure_seconds` | Wait time after the failure command fails |
+| `failure_retries_before_command` | no | `0` | Consecutive failures required before executing the command |
 
-[healthcheck_probes.checks.expected_header]
-"X-Service-Status" = "healthy"
-"Content-Type" = "application/json"
+**Note:** `url` and `apps` are mutually exclusive.
 
-[[healthcheck_probes]]
-name = "Regex Pattern Check"
-url = "https://api.example.com/version"
-interval_seconds = 120
+#### Check Types
 
-[healthcheck_probes.checks]
-expected_status = 200
-expected_body_regex = "\"version\":\\s*\"\\d+\\.\\d+\\.\\d+\""
+At least one check must be configured per probe. All configured checks must pass.
 
-# Monitor multiple apps with the same configuration
+| Key | Description |
+|-----|-------------|
+| `expected_status` | Expected HTTP status code |
+| `expected_body_contains` | Substring that must appear in the response body |
+| `expected_body_regex` | Regex pattern that must match the response body |
+| `expected_header` | Key-value map of HTTP headers that must be present |
+
+#### Multiple Apps (Healthcheck)
+
+Use `apps` to apply the same probe configuration to multiple endpoints. Each app creates an independent probe instance named `"<probe name> - <app id>"`.
+
+```toml
 [[healthcheck_probes]]
 name = "App Monitor"
 interval_seconds = 60
@@ -106,202 +174,26 @@ id = "app_backend"
 url = "https://backend.example.com/health"
 ```
 
-### Configuration Parameters
+App fields:
 
-#### Probe Configuration
+| Key | Required | Description |
+|-----|----------|-------------|
+| `id` | yes | Identifier substituted as `${APP_ID}` in `on_failure_command` |
+| `url` | yes | Health check URL for this app |
 
-- `name` (required): A descriptive name for the probe
-- `url` (optional): The HTTP endpoint to monitor — required if `apps` is not specified
-- `apps` (optional): List of applications to monitor — required if `url` is not specified
-- `interval_seconds` (required): Default interval for running the probe (in seconds)
-- `on_failure_command` (optional): Shell command to execute when checks fail (supports `${APP_ID}`, `&&`, pipes)
-- `command_timeout_seconds` (optional): Timeout for command execution (default: 30)
-- `delay_after_success_seconds` (optional): Delay before next execution after successful check (defaults to `interval_seconds`)
-- `delay_after_failure_seconds` (optional): Delay before next execution after failed check (defaults to `interval_seconds`)
-- `delay_after_command_success_seconds` (optional): Delay before next execution after failure command succeeds (defaults to `delay_after_failure_seconds`)
-- `delay_after_command_failure_seconds` (optional): Delay before next execution after failure command fails (defaults to `delay_after_failure_seconds`)
-- `failure_retries_before_command` (optional): Number of consecutive failures before executing the failure command (default: 0 = execute immediately)
+### WarpScript Probes (Auto-Scaling)
 
-**Note:** `url` and `apps` are mutually exclusive. Use `url` for a single endpoint, `apps` to monitor multiple apps with the same configuration.
+Monitor Warp 10 metrics and automatically scale applications based on numeric thresholds.
 
-**App Configuration:**
-- `id` (required): Application identifier — substituted as `${APP_ID}` in `on_failure_command`
-- `url` (required): Health check URL for this specific app
-
-#### Check Types
-
-At least one check must be configured for each probe:
-
-- `expected_status`: Expected HTTP status code (e.g., 200, 404)
-- `expected_body_contains`: String that must be present in response body
-- `expected_body_regex`: Regex pattern that must match the response body
-- `expected_header`: Key-value pairs of expected HTTP headers
-
-The same checks apply to all apps within a probe.
-
-All configured checks must pass for the probe to succeed.
-
-## Usage
-
-### Running the Application
+#### Environment Variables
 
 ```bash
-# Use default config.toml in current directory
-cargo run --release
-
-# Or specify a custom configuration file
-cargo run --release -- --config /path/to/config.toml
-
-# Or run the compiled binary directly
-./target/release/poc-sonde --config config.toml
-
-# Enable health check endpoint on default port 8080
-./target/release/poc-sonde --healthcheck
-
-# Enable health check endpoint on custom port
-./target/release/poc-sonde --healthcheck --healthcheck-port 9090
-
-# Combine with custom config
-./target/release/poc-sonde --config myconfig.toml --healthcheck --healthcheck-port 3000
-```
-
-### Command Line Options
-
-```
-Usage: poc-sonde [OPTIONS]
-
-Options:
-      --config <CONFIG>
-          Configuration file path [default: config.toml]
-      --healthcheck
-          Enable health check HTTP server
-      --healthcheck-port <HEALTHCHECK_PORT>
-          Port for health check server (requires --healthcheck) [default: 8080]
-  -h, --help
-          Print help
-  -V, --version
-          Print version
-```
-
-### Health Check Endpoint
-
-When enabled with `--healthcheck`, the application starts an HTTP server that responds to all requests with:
-- **Status**: 200 OK
-- **Body**: "Probe is running"
-- **Port**: Configurable via `--healthcheck-port` (default: 8080)
-
-This endpoint can be used to monitor the health of the monitoring application itself (meta-monitoring).
-
-```bash
-# Start with health check on port 8080
-./target/release/poc-sonde --healthcheck
-
-# Test the health check endpoint
-curl http://localhost:8080
-# Output: Probe is running
-```
-
-### Retry Strategies
-
-Configure different delays after success or failure to implement retry strategies:
-
-```toml
-[[healthcheck_probes]]
-name = "Critical API"
-url = "https://api.example.com/health"
-interval_seconds = 300              # Default interval (5 minutes)
-delay_after_success_seconds = 300   # Continue checking every 5 minutes when healthy
-delay_after_failure_seconds = 30    # Fast retry: check every 30 seconds when unhealthy
-on_failure_command = "systemctl restart myservice"
-
-[healthcheck_probes.checks]
-expected_status = 200
-```
-
-**Use cases:**
-- **Fast failure detection**: Set short `delay_after_failure_seconds` to quickly detect recovery
-- **Reduced load when healthy**: Set longer `delay_after_success_seconds` to reduce monitoring overhead
-- **Exponential backoff**: Increase `delay_after_failure_seconds` to avoid overwhelming failing services
-
-### Delays After Command Execution
-
-Control delays specifically after the failure command executes:
-
-```toml
-[[healthcheck_probes]]
-name = "Self-Healing Service"
-url = "https://api.example.com/health"
-interval_seconds = 60
-delay_after_failure_seconds = 10             # Retry quickly when unhealthy
-delay_after_command_success_seconds = 120    # Wait 2 min after successful restart
-delay_after_command_failure_seconds = 30     # Wait 30s if restart fails
-failure_retries_before_command = 2
-on_failure_command = "systemctl restart myservice"
-
-[healthcheck_probes.checks]
-expected_status = 200
-```
-
-**How it works:**
-- Check fails → retries every `delay_after_failure_seconds` until threshold reached
-- Command executes and **succeeds** → wait `delay_after_command_success_seconds` before next check
-- Command executes and **fails** → wait `delay_after_command_failure_seconds` before next check
-
-**Use cases:**
-- **Service stabilization**: Give the service more time to restart after successful command execution
-- **Avoid restart loops**: Use shorter delay after command failure to quickly verify if manual intervention is needed
-- **Resource optimization**: Longer delays after restart to allow warmup time
-
-### Failure Retry Threshold
-
-Avoid false alerts by requiring multiple consecutive failures before executing the failure command:
-
-```toml
-[[healthcheck_probes]]
-name = "API with Transient Issues"
-url = "https://api.example.com/health"
-interval_seconds = 60
-delay_after_failure_seconds = 10            # Retry every 10 seconds on failure
-failure_retries_before_command = 3          # Only execute command after 3 consecutive failures
-on_failure_command = "alert-admin.sh"
-
-[healthcheck_probes.checks]
-expected_status = 200
-```
-
-**How it works:**
-- The probe retries failed checks according to `delay_after_failure_seconds`
-- Consecutive failures are counted and persisted
-- The failure command is executed only when `consecutive_failures > failure_retries_before_command`
-- Counter resets to 0 on first successful check
-
-**Configuration examples:**
-- `failure_retries_before_command = 0` (default): Execute command immediately on first failure
-- `failure_retries_before_command = 3`: Wait for 3 failures before alerting (good for services with occasional hiccups)
-- `failure_retries_before_command = 10`: High tolerance (good for non-critical or flaky services)
-
-**Benefits:**
-- Reduces false alerts from transient network issues
-- Gives services time to self-recover before intervention
-- Prevents command/alert spam during outages
-- Different tolerance levels per probe
-
-### WarpScript Probes - Auto-Scaling
-
-Monitor metrics from Warp 10 and automatically scale your applications based on numeric thresholds.
-
-#### Prerequisites
-
-Set the required environment variable:
-```bash
-# Required: Warp API endpoint
+# Required when WarpScript probes are configured
 export WARP_ENDPOINT="https://warp.example.com/api/v0/exec"
 
-# Optional: Default Warp token (fallback for apps without warp_token)
+# Optional: fallback token for apps without warp_token
 export WARP_TOKEN="YOUR_READ_TOKEN"
 ```
-
-**Note:** Each app can have its own `warp_token` in the configuration. If an app doesn't specify `warp_token`, it will use the `WARP_TOKEN` environment variable as fallback.
 
 #### Configuration Example
 
@@ -310,419 +202,257 @@ export WARP_TOKEN="YOUR_READ_TOKEN"
 name = "CPU Auto-Scaler"
 warpscript_file = "warpscript/cpu_usage.mc2"
 interval_seconds = 60
-delay_after_scale_seconds = 120  # Wait 2min after scaling
+command_timeout_seconds = 45          # Optional, default: 30
+delay_after_scale_seconds = 120       # Optional, default: interval_seconds
 
-# Define apps with optional custom tokens
 [[warpscript_probes.apps]]
 id = "app_frontend"
-warp_token = "READ_TOKEN_FRONTEND"  # Optional: custom token
+warp_token = "READ_TOKEN_FRONTEND"    # Optional: overrides WARP_TOKEN env var
 
 [[warpscript_probes.apps]]
 id = "app_backend"
-# warp_token not specified: uses WARP_TOKEN env var
+# No warp_token: uses WARP_TOKEN env var
 
-# Level 1: Minimum scale (1 replica)
+# Level 1: minimum scale
 [[warpscript_probes.levels]]
 level = 1
-scale_up_threshold = 70.0          # If CPU > 70%, scale up
+scale_up_threshold = 70.0
 upscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 
-# Level 2: Medium scale (2 replicas)
+# Level 2: medium scale
 [[warpscript_probes.levels]]
 level = 2
-scale_up_threshold = 85.0          # If CPU > 85%, scale up
-scale_down_threshold = 50.0        # If CPU < 50%, scale down
+scale_up_threshold = 85.0
+scale_down_threshold = 50.0
 upscale_command = "clever scale --app ${APP_ID} --min-instances 3"
 downscale_command = "clever scale --app ${APP_ID} --min-instances 1"
 
-# Level 3: Maximum scale (3 replicas)
+# Level 3: maximum scale
 [[warpscript_probes.levels]]
 level = 3
-scale_down_threshold = 60.0        # If CPU < 60%, scale down
+scale_down_threshold = 60.0
 downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 ```
 
-#### Configuration Parameters
+#### Parameters
 
-**WarpScript Probe Configuration:**
-- `name` (required): A descriptive name for the probe
-- `warpscript_file` (required): Path to the WarpScript file to execute
-- `interval_seconds` (required): Interval between executions (in seconds)
-- `command_timeout_seconds` (optional): Timeout for command execution (default: 30)
-- `delay_after_scale_seconds` (optional): Delay after scaling up or down (defaults to `interval_seconds`)
-- `apps` (optional): List of applications to manage (default: empty list)
+**Probe:**
 
-**App Configuration:**
-- `id` (required): Application identifier
-- `warp_token` (optional): Warp read token for this app (uses WARP_TOKEN env var if not specified)
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `name` | yes | — | Descriptive name |
+| `warpscript_file` | yes | — | Path to the `.mc2` file |
+| `interval_seconds` | yes | — | Interval between executions |
+| `command_timeout_seconds` | no | `30` | Max execution time for scaling commands |
+| `delay_after_scale_seconds` | no | `interval_seconds` | Wait time after any scaling action |
+| `apps` | no | `[]` | List of apps to manage |
 
-**Level Configuration:**
-- `level` (required): Level number (1, 2, 3, etc.) - must be unique and ordered
-- `scale_up_threshold` (optional): Value threshold to trigger upscale (move to level+1)
-- `scale_down_threshold` (optional): Value threshold to trigger downscale (move to level-1)
-- `upscale_command` (optional): Shell command to execute when scaling up from this level
-- `downscale_command` (optional): Shell command to execute when scaling down from this level
+**App:**
 
-**Notes:**
-- At least one level must be defined
-- Level 1 is considered the minimum level (downscale ignored)
-- Highest level number is considered the maximum level (upscale ignored)
-- At least one threshold per level should be defined (except at boundaries)
-- Commands support `${APP_ID}` placeholder for per-app execution
+| Key | Required | Description |
+|-----|----------|-------------|
+| `id` | yes | Identifier substituted as `${APP_ID}` |
+| `warp_token` | no | Per-app read token (falls back to `WARP_TOKEN` env var) |
+
+**Level:**
+
+At least one level must be defined per probe. Level numbers must be unique.
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `level` | yes* | Level number — use `level = N` for a single level |
+| `levels` | yes* | Level numbers — use `levels = [N, M, ...]` for multiple levels sharing the same config |
+| `scale_up_threshold` | no | If value exceeds this, scale up (ignored at max level) |
+| `scale_down_threshold` | no | If value drops below this, scale down (ignored at min level) |
+| `upscale_command` | no | Command executed when scaling up from this level |
+| `downscale_command` | no | Command executed when scaling down from this level |
+
+*`level` and `levels` are mutually exclusive; exactly one must be specified per entry.
+
+#### Sharing Config Across Multiple Levels
+
+When consecutive levels share identical thresholds and commands, use `levels = [N, M, ...]` instead of repeating the block:
+
+```toml
+# Before (verbose)
+[[warpscript_probes.levels]]
+level = 2
+scale_down_threshold = 45.0
+downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+
+[[warpscript_probes.levels]]
+level = 3
+scale_down_threshold = 45.0
+downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+
+# After (compact)
+[[warpscript_probes.levels]]
+levels = [2, 3]
+scale_down_threshold = 45.0
+downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+```
+
+Entries are automatically sorted by level number after deserialization regardless of declaration order.
+
+#### How Scaling Works
+
+1. The WarpScript file is executed via HTTP POST to `WARP_ENDPOINT`
+2. `${WARP_TOKEN}` in the file is replaced with the app's `warp_token` or the `WARP_TOKEN` env var
+3. `${APP_ID}` in the file and in commands is replaced with the app's `id`
+4. The last element of the JSON response array is used as the metric value
+5. The value is compared against the **current level's** thresholds:
+   - `value > scale_up_threshold` → execute `upscale_command`, move to level + 1
+   - `value < scale_down_threshold` → execute `downscale_command`, move to level − 1
+6. Boundaries: upscale is ignored at max level, downscale is ignored at min level
+7. After any scaling action, wait `delay_after_scale_seconds` before the next check
+8. Current level is persisted (Redis or in-memory) and restored on restart
+
+#### Scaling Strategy Tips
+
+- **Hysteresis**: Keep `scale_down_threshold` meaningfully below `scale_up_threshold` to avoid flapping (e.g., up at 70 %, down at 50 %)
+- **Cooldown**: Use `delay_after_scale_seconds` to let the system stabilize before re-evaluating
+- **Progressive thresholds**: Set higher up-thresholds for higher levels (e.g., 70 % → level 2, 85 % → level 3)
 
 #### WarpScript File Example
 
 ```warpscript
 // warpscript/cpu_usage.mc2
-// ${WARP_TOKEN} is automatically replaced with the env var value
-// ${APP_ID} is replaced with the specific app_id for this probe instance
+// ${WARP_TOKEN} → replaced with the effective read token
+// ${APP_ID}     → replaced with the specific app id
 
 '${WARP_TOKEN}' 'token' STORE
 '${APP_ID}' 'app' STORE
 
-// Fetch CPU metric for this specific app (last 5 minutes)
 [
   $token
   'os.cpu'
-  { 'app_id' $app }  // Filter by this specific app_id
+  { 'app_id' $app }
   NOW 5 m -
   NOW
 ]
 FETCH
 
-// Calculate average
 [ SWAP bucketizer.mean 0 1 0 ] BUCKETIZE
 
-// Return single value
+// Return a single numeric value (e.g., 75.5)
 0 GET VALUES 0 GET 0 GET
-
-// Top of stack must be a number (e.g., 75.5)
 ```
 
-#### How It Works
+See `config-warpscript-example.toml` for complete multi-level examples.
 
-1. **Probe Expansion**: If `apps` is specified, each app creates an independent probe instance
-   - Example: 3 apps = 3 separate probes with independent states
-2. **Execution**: WarpScript file is executed via HTTP POST to `WARP_ENDPOINT`
-3. **Token Substitution**: `${WARP_TOKEN}` in the file is replaced with:
-   - App's custom `warp_token` if specified
-   - Otherwise, `WARP_TOKEN` environment variable
-4. **App ID Substitution**: `${APP_ID}` is replaced with the specific app id for this probe instance
-   - In WarpScript files
-   - In scaling commands
-5. **Value Extraction**: Last element from JSON response array is used as the metric value
-6. **Scaling Logic**: Based on **current level** and value:
-   - If `value > scale_up_threshold` → **UPSCALE** (level + 1)
-     - Execute `upscale_command` of current level
-     - Increment level (unless already at max)
-   - If `value < scale_down_threshold` → **DOWNSCALE** (level - 1)
-     - Execute `downscale_command` of current level
-     - Decrement level (unless already at min)
-7. **Boundary Protection**:
-   - At **minimum level**: downscale is ignored
-   - At **maximum level**: upscale is ignored
-8. **State Persistence**: Current level and last value are persisted per probe instance (Redis or memory)
-
-#### Scaling Strategy Tips
-
-- **Hysteresis**: Set `scale_down_threshold` lower than `scale_up_threshold` to avoid flapping
-  - Example: Up at 70%, Down at 50% (20% hysteresis)
-- **Cooldown**: Use `delay_after_scale_seconds` to stabilize after scaling actions
-- **Gradual**: Define progressive thresholds (level 1→2 at 70%, level 2→3 at 85%)
-
-#### Managing Multiple Applications
-
-You can manage multiple applications with a single configuration using the `apps` array to avoid duplication:
-
-**In configuration:**
-```toml
-[[warpscript_probes]]
-name = "Multi-App Scaler"
-warpscript_file = "warpscript/metrics.mc2"
-
-[[warpscript_probes.apps]]
-id = "app_frontend"
-warp_token = "TOKEN_FRONTEND"  # Optional custom token
-
-[[warpscript_probes.apps]]
-id = "app_backend"
-warp_token = "TOKEN_BACKEND"
-
-[[warpscript_probes.apps]]
-id = "app_worker"
-# No warp_token: uses WARP_TOKEN env var
-
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 70.0
-upscale_command = "clever scale --app ${APP_ID} --min-instances 2"
-```
-
-**How it works:**
-- **Probe Expansion**: The configuration above creates **3 independent probes**:
-  - "Multi-App Scaler - app_frontend" (uses TOKEN_FRONTEND)
-  - "Multi-App Scaler - app_backend" (uses TOKEN_BACKEND)
-  - "Multi-App Scaler - app_worker" (uses WARP_TOKEN env var)
-- **Independent State**: Each probe has its own:
-  - Current scaling level
-  - Last metric value
-  - State persistence
-  - Optional custom Warp token
-- **Substitution**: In each probe instance:
-  - `${APP_ID}` in WarpScript → replaced with specific app id (e.g., `app_frontend`)
-  - `${APP_ID}` in commands → replaced with specific app id
-  - `${WARP_TOKEN}` in WarpScript → replaced with app's custom token or WARP_TOKEN env var
-
-**Benefits:**
-- Avoid configuration duplication for similar apps
-- Each app scales independently based on its own metrics
-- Each app can use its own Warp token (for multi-tenant scenarios)
-- Consistent scaling policies across multiple apps
-- Each app can be at a different scaling level
-
-#### Benefits
-
-- Automatic horizontal/vertical scaling based on real metrics
-- Gradual scale up/down to prevent over-provisioning
-- State persistence ensures correct level after restarts
-- Flexible WarpScript queries for any Warp 10 metric
-- Works with any platform (Kubernetes, Clever Cloud, etc.)
-
-### Redis Persistence (Optional)
-
-Enable Redis persistence to maintain probe state across restarts.
-
-#### Configuration Options
-
-**Option 1: Using REDIS_URL**
-```bash
-export REDIS_URL="redis://localhost:6379"
-# With password:
-export REDIS_URL="redis://:mypassword@localhost:6379"
-```
-
-**Option 2: Using separate environment variables**
-```bash
-export REDIS_HOST="localhost"
-export REDIS_PORT="6379"           # Optional, defaults to 6379
-export REDIS_PASSWORD="mypassword" # Optional
-```
-
-**Priority**: `REDIS_URL` takes precedence over individual variables.
-
-#### Building and Running
-
-```bash
-# Build with Redis support
-cargo build --release --features redis-persistence
-
-# Run the application
-./target/release/poc-sonde
-```
-
-#### Behavior
-
-**Without Redis configuration**: The application uses in-memory persistence (state is lost on restart).
-
-**With Redis configuration**: Probe states are persisted to Redis:
-- Last execution timestamp
-- Success/failure status
-- Next scheduled execution time
-- On restart, probes resume from their saved state
-
-**Benefits:**
-- No duplicate checks immediately after restart
-- Maintains retry schedules across deployments
-- Enables horizontal scaling (future feature)
-
-#### Examples
-
-```bash
-# Development: Local Redis without password
-export REDIS_HOST="localhost"
-./target/release/poc-sonde
-
-# Production: Redis with authentication
-export REDIS_HOST="redis.example.com"
-export REDIS_PORT="6379"
-export REDIS_PASSWORD="prod-secret-password"
-./target/release/poc-sonde
-
-# Docker/Kubernetes: Using REDIS_URL
-export REDIS_URL="redis://:${REDIS_PASS}@redis-service:6379"
-./target/release/poc-sonde
-
-# Cloud Redis (e.g., AWS ElastiCache, Google Cloud Memorystore)
-export REDIS_URL="redis://my-redis.abc123.cache.amazonaws.com:6379"
-./target/release/poc-sonde
-```
-
-### Configuring Log Levels
-
-Use the `RUST_LOG` environment variable to control logging verbosity:
-
-```bash
-# Info level (default)
-RUST_LOG=info cargo run
-
-# Debug level (detailed)
-RUST_LOG=debug cargo run
-
-# Trace level (very detailed)
-RUST_LOG=trace cargo run
-
-# Filter specific modules
-RUST_LOG=poc_sonde::probe=debug cargo run
-```
-
-### Graceful Shutdown
-
-Press `Ctrl+C` to gracefully shut down the application. All running probes will be terminated.
-
-## Log Format
-
-The application produces structured logs with the following information:
-
-```
-2024-01-15T10:30:45.123456Z  INFO poc_sonde: Starting HTTP monitoring application
-2024-01-15T10:30:45.234567Z  INFO poc_sonde: Loading configuration config_path="config.toml"
-2024-01-15T10:30:45.345678Z  INFO poc_sonde::probe: Starting HTTP probe probe_name="API Health Check" url="https://api.example.com/health"
-2024-01-15T10:30:45.456789Z  INFO poc_sonde::probe: Received HTTP response probe_name="API Health Check" status=200 duration_ms=111
-2024-01-15T10:30:45.567890Z  INFO poc_sonde::probe: All checks passed probe_name="API Health Check" duration_ms=222
-```
-
-## Examples
-
-### Example 1: Monitor API Health
+### Retry Strategies
 
 ```toml
 [[healthcheck_probes]]
-name = "Production API"
-url = "https://api.myapp.com/health"
-interval_seconds = 30
-on_failure_command = "curl -X POST https://hooks.slack.com/... -d '{\"text\":\"API is down!\"}'"
-
-[healthcheck_probes.checks]
-expected_status = 200
-expected_body_contains = "healthy"
-```
-
-### Example 2: Monitor Service with Auto-Restart
-
-```toml
-[[healthcheck_probes]]
-name = "Backend Service"
-url = "http://localhost:8080/status"
-interval_seconds = 60
+name = "Critical API"
+url = "https://api.example.com/health"
+interval_seconds = 300
+delay_after_success_seconds = 300     # Check every 5 min when healthy
+delay_after_failure_seconds = 30      # Fast retry when unhealthy
+delay_after_command_success_seconds = 120  # Wait 2 min after restart
+delay_after_command_failure_seconds = 30   # Wait 30 s if restart fails
+failure_retries_before_command = 3    # Tolerate 3 transient failures
 on_failure_command = "systemctl restart myservice"
 
 [healthcheck_probes.checks]
 expected_status = 200
 ```
 
-### Example 3: Validate API Response Format
+**Delay resolution order:**
+
+| Situation | Delay used |
+|-----------|-----------|
+| Check succeeded | `delay_after_success_seconds` → `interval_seconds` |
+| Check failed (below threshold) | `delay_after_failure_seconds` → `interval_seconds` |
+| Failure command succeeded | `delay_after_command_success_seconds` → `delay_after_failure_seconds` |
+| Failure command failed | `delay_after_command_failure_seconds` → `delay_after_failure_seconds` |
+
+### Redis Persistence (Optional)
+
+Build with `--features redis-persistence` and provide connection details:
+
+```bash
+# Option 1: single URL (takes precedence)
+export REDIS_URL="redis://:mypassword@localhost:6379"
+
+# Option 2: individual variables
+export REDIS_HOST="localhost"
+export REDIS_PORT="6379"           # Optional, default: 6379
+export REDIS_PASSWORD="mypassword" # Optional
+```
+
+Without Redis configuration, in-memory persistence is used (state lost on restart).
+
+With Redis, each probe instance persists:
+- Last execution timestamp
+- Current scaling level (WarpScript probes)
+- Consecutive failure counter (healthcheck probes)
+- Next scheduled execution time
+
+This prevents duplicate checks immediately after a restart and preserves scaling levels across deployments.
+
+## Command Execution
+
+All commands (`on_failure_command`, `upscale_command`, `downscale_command`) are run via `sh -c`, so shell operators work:
 
 ```toml
-[[healthcheck_probes]]
-name = "User API"
-url = "https://api.myapp.com/users/1"
-interval_seconds = 120
+# Shell operators
+on_failure_command = "clever scale --app ${APP_ID} --flavor S && clever restart --app ${APP_ID}"
 
-[healthcheck_probes.checks]
-expected_status = 200
-expected_body_regex = "\\{\"id\":\\s*\\d+,\\s*\"name\":\\s*\".+\"\\}"
+# Pipes
+on_failure_command = "echo 'Alert' | mail -s 'App down' ops@example.com"
+```
+
+`${APP_ID}` is substituted with the app identifier before execution.
+
+## Logging
+
+Control verbosity with `RUST_LOG`:
+
+```bash
+RUST_LOG=info ./target/release/cc-sonde        # Default
+RUST_LOG=debug ./target/release/cc-sonde       # Detailed
+RUST_LOG=cc_sonde::config=debug ./target/release/cc-sonde  # Module-level filter
+```
+
+Log output format:
+
+```
+2024-01-15T10:30:45.123Z  INFO cc_sonde: Starting HTTP monitoring application
+2024-01-15T10:30:45.234Z  INFO cc_sonde: Loading configuration config_path="config.toml"
+2024-01-15T10:30:45.345Z  INFO cc_sonde::healthcheck_probe: All checks passed probe_name="API Health Check" duration_ms=111
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
 cargo test
 
-# Run tests with output
+# With output
 cargo test -- --nocapture
 
-# Run specific test
-cargo test test_valid_config
+# Specific test
+cargo test test_warpscript_levels_plural_expands
 ```
 
 ## Troubleshooting
 
-### Configuration Errors
-
-If you see "Configuration must contain at least one probe":
-- Ensure your `config.toml` has at least one `[[healthcheck_probes]]` section
-
-If you see "Probe has no checks configured":
-- Add at least one check type to `[healthcheck_probes.checks]`
-
-### Network Errors
-
-If probes fail with connection errors:
-- Verify the URLs are accessible from your machine
-- Check firewall settings
-- Ensure DNS resolution is working
-
-### Command Execution Errors
-
-If failure commands don't execute:
-- Verify the command exists and is in your PATH
-- Check permissions for the command
-- Review logs with `RUST_LOG=debug` for detailed error messages
-
-### Timeout Issues
-
-If commands are timing out:
-- Increase `command_timeout_seconds` in the probe configuration
-- Ensure the command isn't hanging or waiting for input
-
-## Performance Considerations
-
-- Each probe runs in its own async task
-- HTTP requests have a 30-second timeout
-- Shell commands respect the configured timeout
-- The application is designed to handle dozens of probes concurrently
-
-## Command Execution
-
-All commands (`on_failure_command`, `upscale_command`, `downscale_command`) are executed via `sh -c`, which means:
-- Shell operators are supported: `&&`, `||`, `;`, pipes (`|`)
-- `${APP_ID}` is substituted with the app identifier before execution
-
-```toml
-# Simple command
-on_failure_command = "clever restart --app ${APP_ID}"
-
-# Chained commands with &&
-on_failure_command = "clever scale --app ${APP_ID} --flavor S && clever restart --app ${APP_ID}"
-
-# With pipe
-on_failure_command = "echo 'Alert' | mail -s 'App down' ops@example.com"
-```
+| Symptom | Likely cause |
+|---------|-------------|
+| `Configuration must contain at least one probe` | `healthcheck_probes` array is empty or missing |
+| `Probe has no checks configured` | No key defined under `[healthcheck_probes.checks]` |
+| `a scaling level entry must specify either level = N or levels = [N, ...]` | WarpScript level block is missing both `level` and `levels` |
+| `WarpScript probe '…' has duplicate level number N` | Same level defined twice (including via `levels = [N, N]`) |
+| `WARP_ENDPOINT environment variable not set` | Required env var missing when WarpScript probes are configured |
+| Command timeout | Increase `command_timeout_seconds`; ensure the command doesn't wait for input |
+| Connection errors | Verify URL reachability, DNS, and firewall rules |
 
 ## Security Notes
 
-- Shell commands are executed with the same privileges as the application
-- Be cautious with commands that require elevated permissions
-- Validate URLs to prevent unintended network access
-- Consider using specific commands rather than shell scripts for better security
-
-## Improvements and Future Features
-
-Potential enhancements:
-- HTTPS with custom certificates
-- Prometheus metrics export
-- Webhook notifications
-- Configuration hot-reload
-- Web UI for status visualization
-- Multiple notification channels
-- Retry logic with exponential backoff
-- Health check history and statistics
+- Commands execute with the same OS privileges as the application process
+- `${APP_ID}` is substituted verbatim — ensure app identifiers don't contain shell metacharacters
+- Consider running the application as a dedicated low-privilege user
 
 ## License
 
-This is a proof-of-concept (POC) project. Use at your own discretion.
-
-## Contributing
-
-This is a POC project. Feel free to fork and modify for your needs.
+MIT — use at your own discretion.
