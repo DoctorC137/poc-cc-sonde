@@ -227,10 +227,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("All probe tasks spawned, waiting for shutdown signal");
 
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
+    }
 
     info!("Shutdown signal received, terminating...");
+
+    for handle in handles {
+        handle.abort();
+    }
 
     Ok(())
 }

@@ -23,6 +23,7 @@ A Rust-based monitoring application that periodically checks HTTP endpoints and 
 - **Retry Threshold**: Require N consecutive failures before triggering the failure command
 - **Configurable Delays**: Different wait times after success, failure, command success, command failure
 - **Concurrent Execution**: All probes run as independent async tasks
+- **Graceful Shutdown**: Handles SIGTERM (containers, systemd) and SIGINT (Ctrl+C) for clean task teardown
 - **Health Check Endpoint**: Optional HTTP server to expose the application's own liveness
 - **State Persistence**: In-memory (default) or Redis-backed persistence across restarts
 - **Structured Logging**: Configurable log levels via `RUST_LOG`
