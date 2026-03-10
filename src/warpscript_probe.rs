@@ -1,5 +1,4 @@
 use reqwest::Client;
-use std::env;
 use tracing::{debug, error, info};
 
 pub fn build_client() -> Result<Client, reqwest::Error> {
@@ -10,8 +9,6 @@ pub fn build_client() -> Result<Client, reqwest::Error> {
 
 #[derive(Debug)]
 pub enum WarpScriptError {
-    MissingEndpoint,
-    MissingToken,
     RequestError(String),
     ParseError(String),
     NoScalarValue,
@@ -20,8 +17,6 @@ pub enum WarpScriptError {
 impl std::fmt::Display for WarpScriptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WarpScriptError::MissingEndpoint => write!(f, "WARP_ENDPOINT environment variable not set"),
-            WarpScriptError::MissingToken => write!(f, "warp_token not configured for this app and WARP_TOKEN environment variable not set"),
             WarpScriptError::RequestError(e) => write!(f, "Warp API request failed: {}", e),
             WarpScriptError::ParseError(e) => write!(f, "Failed to parse Warp response: {}", e),
             WarpScriptError::NoScalarValue => write!(f, "No scalar value returned from WarpScript"),
@@ -33,25 +28,17 @@ impl std::error::Error for WarpScriptError {}
 
 /// Execute a WarpScript and return the scalar value.
 /// `script` is the script content (read once by the caller).
+/// `token` and `endpoint` are resolved once by the caller before the loop.
 pub async fn execute_warpscript(
     probe_name: &str,
     script: &str,
     app_id: Option<&str>,
-    custom_token: Option<&str>,
+    token: &str,
+    endpoint: &str,
     client: &Client,
 ) -> Result<f64, WarpScriptError> {
-    // Read environment variables
-    let endpoint = env::var("WARP_ENDPOINT").map_err(|_| WarpScriptError::MissingEndpoint)?;
-
-    // Use custom token if provided, otherwise fallback to WARP_TOKEN env var
-    let token = if let Some(t) = custom_token {
-        t.to_string()
-    } else {
-        env::var("WARP_TOKEN").map_err(|_| WarpScriptError::MissingToken)?
-    };
-
     // Substitute ${WARP_TOKEN} with actual token
-    let script = script.replace("${WARP_TOKEN}", &token);
+    let script = script.replace("${WARP_TOKEN}", token);
 
     // Substitute ${APP_ID} with the app_id value
     let script = if let Some(id) = app_id {
@@ -74,7 +61,7 @@ pub async fn execute_warpscript(
     );
 
     let response = client
-        .post(&endpoint)
+        .post(endpoint)
         .header("Content-Type", "text/plain")
         .body(script)
         .send()

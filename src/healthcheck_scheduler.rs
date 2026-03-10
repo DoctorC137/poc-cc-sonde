@@ -127,11 +127,11 @@ pub async fn schedule_probe(probe: Probe, backend: Arc<dyn PersistenceBackend>) 
 
                         info!(
                             probe_name = %probe.name,
-                            command = %command,
                             consecutive_failures = consecutive_failures,
                             threshold = retry_threshold,
                             "Failure threshold reached, executing command"
                         );
+                        debug!(command = %command, "Failure command detail");
 
                         match executor::execute_command(&command, probe.command_timeout_seconds)
                             .await

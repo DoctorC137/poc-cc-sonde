@@ -5,6 +5,7 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
     pub healthcheck_probes: Vec<Probe>,
     #[serde(default)]
     pub warpscript_probes: Vec<WarpScriptProbe>,
@@ -255,8 +256,12 @@ impl Config {
     }
 
     fn validate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.healthcheck_probes.is_empty() {
-            return Err("Configuration must contain at least one probe".into());
+        if self.healthcheck_probes.is_empty() && self.warpscript_probes.is_empty() {
+            return Err(
+                "Configuration must contain at least one probe \
+                 (healthcheck_probes or warpscript_probes)"
+                    .into(),
+            );
         }
 
         // Validate uniqueness of effective probe names (post-app expansion)
@@ -403,12 +408,38 @@ mod tests {
 
     #[test]
     fn test_empty_probes() {
+        // Both arrays empty → must be rejected
         let toml_content = r#"
             healthcheck_probes = []
+            warpscript_probes = []
         "#;
 
         let mut config: Config = toml::from_str(toml_content).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_warpscript_only() {
+        // Config with only warpscript_probes (no healthcheck_probes) must be accepted
+        let toml_content = r#"
+            [[warpscript_probes]]
+            name = "ws-only"
+            warpscript_file = "test.mc2"
+            interval_seconds = 60
+
+            [[warpscript_probes.levels]]
+            level = 1
+            scale_up_threshold = 70.0
+            upscale_command = "scale up"
+
+            [[warpscript_probes.levels]]
+            level = 2
+            scale_down_threshold = 50.0
+            downscale_command = "scale down"
+        "#;
+
+        let mut config: Config = toml::from_str(toml_content).unwrap();
+        assert!(config.validate().is_ok());
     }
 
     fn warpscript_probe_toml(levels_block: &str) -> String {

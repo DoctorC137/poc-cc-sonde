@@ -2,6 +2,7 @@ use crate::config::WarpScriptProbe;
 use crate::executor;
 use crate::persistence::{self, PersistenceBackend, WarpScriptProbeState};
 use crate::warpscript_probe;
+use std::env;
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,12 +24,8 @@ async fn execute_scaling_command(
         command.to_string()
     };
 
-    info!(
-        probe_name = %probe_name,
-        command = %cmd,
-        action = %action,
-        "Executing {} command", action
-    );
+    info!(probe_name = %probe_name, action = %action, "Executing {} command", action);
+    debug!(command = %cmd, "Scaling command detail");
 
     match executor::execute_command(&cmd, timeout_seconds).await {
         Ok(output) => {
@@ -142,17 +139,31 @@ pub async fn schedule_warpscript_probe(
         }
     };
 
-    // Read the WarpScript file once before the loop to avoid repeated disk I/O
-    let script_content = match fs::read_to_string(&probe.warpscript_file) {
-        Ok(content) => content,
-        Err(e) => {
-            error!(
-                probe_name = %probe.name,
-                file = %probe.warpscript_file,
-                error = %e,
-                "Failed to read WarpScript file"
-            );
+    // Resolve environment variables once before the loop (stable for process lifetime)
+    let endpoint = match env::var("WARP_ENDPOINT") {
+        Ok(v) => v,
+        Err(_) => {
+            error!(probe_name = %probe.name, "WARP_ENDPOINT environment variable not set");
             return;
+        }
+    };
+    let fallback_token = env::var("WARP_TOKEN").ok();
+
+    // Read the WarpScript file once before the loop to avoid repeated disk I/O.
+    // Retry on transient errors (file not yet mounted, wrong permissions at startup).
+    let script_content = loop {
+        match fs::read_to_string(&probe.warpscript_file) {
+            Ok(content) => break content,
+            Err(e) => {
+                error!(
+                    probe_name = %probe.name,
+                    file = %probe.warpscript_file,
+                    error = %e,
+                    retry_in_seconds = probe.interval_seconds,
+                    "Failed to read WarpScript file, will retry"
+                );
+                time::sleep(Duration::from_secs(probe.interval_seconds)).await;
+            }
         }
     };
 
@@ -178,14 +189,27 @@ pub async fn schedule_warpscript_probe(
         // Get app (should have exactly one if expanded correctly)
         let app = probe.apps.first();
         let app_id = app.map(|a| a.id.as_str());
-        let custom_token = app.and_then(|a| a.warp_token.as_deref());
+
+        // Resolve effective token: per-app override takes precedence over env fallback
+        let token = match app.and_then(|a| a.warp_token.as_deref()).or(fallback_token.as_deref()) {
+            Some(t) => t,
+            None => {
+                error!(
+                    probe_name = %probe.name,
+                    "No Warp token available (neither app warp_token nor WARP_TOKEN env var set)"
+                );
+                next_delay = probe.interval_seconds;
+                continue;
+            }
+        };
 
         // Execute WarpScript and get value
         let value = match warpscript_probe::execute_warpscript(
             &probe.name,
             &script_content,
             app_id,
-            custom_token,
+            token,
+            &endpoint,
             &client,
         )
         .await
