@@ -5,9 +5,7 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 pub fn build_client() -> Result<Client, reqwest::Error> {
-    Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+    Client::builder().build()
 }
 
 #[derive(Debug)]
@@ -88,7 +86,8 @@ pub async fn execute_probe(probe: &Probe, client: &Client) -> Result<bool, Check
     );
 
     // Execute HTTP request
-    let response = match client.get(url).send().await {
+    let timeout = std::time::Duration::from_secs(probe.get_request_timeout());
+    let response = match client.get(url).timeout(timeout).send().await {
         Ok(resp) => resp,
         Err(e) => {
             error!(
@@ -288,6 +287,7 @@ mod tests {
             delay_after_command_success_seconds: None,
             delay_after_command_failure_seconds: None,
             failure_retries_before_command: None,
+            request_timeout_seconds: None,
             apps: vec![],
         };
 

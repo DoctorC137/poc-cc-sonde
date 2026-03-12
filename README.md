@@ -154,6 +154,7 @@ name = "API Health Check"
 url = "https://api.example.com/health"
 interval_seconds = 60
 on_failure_command = "systemctl restart my-service"
+request_timeout_seconds = 10
 command_timeout_seconds = 30
 delay_after_success_seconds = 300
 delay_after_failure_seconds = 30
@@ -179,6 +180,7 @@ expected_body_regex = "version\":\\s*\"\\d+\\.\\d+"
 | `apps` | yes* | — | List of apps to monitor. Required if `url` is not set. Mutually exclusive with `url`. |
 | `interval_seconds` | yes | — | Default interval between executions. Must be > 0. |
 | `on_failure_command` | no | — | Shell command to execute when the failure threshold is reached |
+| `request_timeout_seconds` | no | `30` | HTTP request timeout for this probe (seconds). The probe fails with a `RequestError` if the server does not respond within this duration. |
 | `command_timeout_seconds` | no | `30` | Maximum execution time for the failure command (seconds) |
 | `delay_after_success_seconds` | no | `interval_seconds` | Wait time after a successful check |
 | `delay_after_failure_seconds` | no | `interval_seconds` | Wait time after a failed check (below threshold) |

@@ -31,6 +31,8 @@ pub struct Probe {
     pub delay_after_command_failure_seconds: Option<u64>,
     /// Number of consecutive failures before executing the failure command (defaults to 0 = execute immediately)
     pub failure_retries_before_command: Option<u32>,
+    /// HTTP request timeout in seconds for this probe (defaults to 30)
+    pub request_timeout_seconds: Option<u64>,
     /// Applications to monitor (each app creates an independent probe instance)
     #[serde(default)]
     pub apps: Vec<HealthCheckApp>,
@@ -67,6 +69,10 @@ impl Probe {
 
     pub fn get_failure_retries_before_command(&self) -> u32 {
         self.failure_retries_before_command.unwrap_or(0)
+    }
+
+    pub fn get_request_timeout(&self) -> u64 {
+        self.request_timeout_seconds.unwrap_or(30)
     }
 }
 
