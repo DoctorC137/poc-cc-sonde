@@ -23,7 +23,8 @@ pub struct WarpScriptProbeState {
     pub probe_name: String,
     pub last_check_timestamp: u64,
     pub current_level: u32,
-    pub last_value: f64,
+    #[serde(default)]
+    pub last_values: HashMap<String, f64>,
     pub next_check_timestamp: u64,
     #[serde(default)]
     pub consecutive_failures: u32,
@@ -100,7 +101,6 @@ impl PersistenceBackend for InMemoryBackend {
         debug!(
             probe_name = %state.probe_name,
             current_level = %state.current_level,
-            last_value = state.last_value,
             "WarpScript state saved to memory"
         );
         Ok(())
@@ -223,7 +223,6 @@ impl PersistenceBackend for RedisBackend {
         debug!(
             probe_name = %state.probe_name,
             current_level = %state.current_level,
-            last_value = state.last_value,
             "WarpScript state saved to Redis"
         );
         Ok(())

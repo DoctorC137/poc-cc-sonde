@@ -96,7 +96,9 @@ pub struct Checks {
 #[derive(Debug, Deserialize, Clone)]
 pub struct WarpScriptProbe {
     pub name: String,
-    pub warpscript_file: String,
+    /// Map of metric name → WarpScript file path (inline TOML table)
+    #[serde(rename = "warpscript_file")]
+    pub warpscript_files: HashMap<String, String>,
     pub interval_seconds: u64,
     #[serde(default = "default_timeout")]
     pub command_timeout_seconds: u64,
@@ -115,9 +117,8 @@ pub struct WarpScriptProbe {
     /// Applications to manage (each with optional warp_token)
     #[serde(default)]
     pub apps: Vec<WarpScriptApp>,
-    /// Scaling levels (must be ordered by level number)
-    #[serde(deserialize_with = "deserialize_levels")]
-    pub levels: Vec<ScalingLevel>,
+    /// Scaling configuration (flavors, instances, thresholds, commands)
+    pub scaling: ScalingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -129,70 +130,37 @@ pub struct WarpScriptApp {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct ScalingLevel {
-    /// Level number (1, 2, 3, etc.)
-    pub level: u32,
-    /// Threshold to trigger upscale (move to level+1)
-    pub scale_up_threshold: Option<f64>,
-    /// Threshold to trigger downscale (move to level-1)
-    pub scale_down_threshold: Option<f64>,
-    /// Command to execute when scaling up FROM this level
-    pub upscale_command: Option<String>,
-    /// Command to execute when scaling down FROM this level
-    pub downscale_command: Option<String>,
+pub struct InstanceRange {
+    pub min: u32,
+    /// If absent, effective_max = min (no instance scaling, only flavor scaling)
+    pub max: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ScalingLevelRaw {
-    /// Singular form: level = N (backwards-compatible)
-    level: Option<u32>,
-    /// Plural form: levels = [N, M, ...] (new)
-    #[serde(default)]
-    levels: Vec<u32>,
-    scale_up_threshold: Option<f64>,
-    scale_down_threshold: Option<f64>,
-    upscale_command: Option<String>,
-    downscale_command: Option<String>,
-}
-
-fn deserialize_levels<'de, D>(deserializer: D) -> Result<Vec<ScalingLevel>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-
-    let raw_entries: Vec<ScalingLevelRaw> = Vec::deserialize(deserializer)?;
-    let mut result: Vec<ScalingLevel> = Vec::new();
-
-    for raw in raw_entries {
-        let level_nums: Vec<u32> = match (raw.level, raw.levels.is_empty()) {
-            (Some(n), true) => vec![n],
-            (None, false) => raw.levels,
-            (Some(_), false) => {
-                return Err(D::Error::custom(
-                    "a scaling level entry cannot specify both `level` and `levels`",
-                ));
-            }
-            (None, true) => {
-                return Err(D::Error::custom(
-                    "a scaling level entry must specify either `level = N` or `levels = [N, ...]`",
-                ));
-            }
-        };
-
-        for n in level_nums {
-            result.push(ScalingLevel {
-                level: n,
-                scale_up_threshold: raw.scale_up_threshold,
-                scale_down_threshold: raw.scale_down_threshold,
-                upscale_command: raw.upscale_command.clone(),
-                downscale_command: raw.downscale_command.clone(),
-            });
-        }
+impl InstanceRange {
+    pub fn effective_max(&self) -> u32 {
+        self.max.unwrap_or(self.min)
     }
+}
 
-    result.sort_by_key(|l| l.level);
-    Ok(result)
+#[derive(Debug, Deserialize, Clone)]
+pub struct ScalingConfig {
+    pub instances: InstanceRange,
+    /// Ordered list of flavors (e.g. ["S", "M", "L"])
+    pub flavors: Vec<String>,
+    /// Thresholds to trigger upscale — scale up if ANY metric exceeds its threshold
+    pub scale_up_threshold: HashMap<String, f64>,
+    /// Thresholds to trigger downscale — scale down if ALL metrics are below their thresholds
+    pub scale_down_threshold: HashMap<String, f64>,
+    pub upscale_command: String,
+    pub downscale_command: String,
+}
+
+/// A computed scaling level (not deserialised, generated at runtime from ScalingConfig).
+#[derive(Debug, Clone)]
+pub struct ComputedLevel {
+    pub level: u32,
+    pub instances: u32,
+    pub flavor: String,
 }
 
 impl WarpScriptProbe {
@@ -219,47 +187,90 @@ impl WarpScriptProbe {
             .unwrap_or(self.interval_seconds)
     }
 
-    /// Get level configuration by level number
-    pub fn get_level(&self, level_num: u32) -> Option<&ScalingLevel> {
-        self.levels.iter().find(|l| l.level == level_num)
+    /// Generate the ordered list of computed levels from flavors and instance range.
+    ///
+    /// Algorithm:
+    /// - Phase 1: each flavor except the last gets one level at `instances.min`
+    /// - Phase 2: the last flavor gets one level per instance count from `min` to `effective_max`
+    ///
+    /// Examples:
+    ///   flavors=["S","M","L"], min=1, max=3 → (1,S,1),(2,M,1),(3,L,1),(4,L,2),(5,L,3)
+    ///   flavors=["S"],         min=1, max=3 → (1,S,1),(2,S,2),(3,S,3)
+    ///   flavors=["S","M"],     min=1, max=None → (1,S,1),(2,M,1)
+    pub fn compute_levels(&self) -> Vec<ComputedLevel> {
+        let sc = &self.scaling;
+        let min_inst = sc.instances.min;
+        let max_inst = sc.instances.effective_max();
+        let flavors = &sc.flavors;
+        let mut levels = Vec::new();
+        let mut level_num = 1u32;
+
+        // Phase 1: all flavors except the last, at min instances
+        for flavor in flavors.iter().take(flavors.len().saturating_sub(1)) {
+            levels.push(ComputedLevel {
+                level: level_num,
+                instances: min_inst,
+                flavor: flavor.clone(),
+            });
+            level_num += 1;
+        }
+
+        // Phase 2: last flavor, from min to max instances (inclusive)
+        if let Some(last_flavor) = flavors.last() {
+            for inst in min_inst..=max_inst {
+                levels.push(ComputedLevel {
+                    level: level_num,
+                    instances: inst,
+                    flavor: last_flavor.clone(),
+                });
+                level_num += 1;
+            }
+        }
+
+        levels
     }
 
-    /// Get minimum level number
+    /// Minimum level is always 1.
     pub fn min_level(&self) -> u32 {
-        self.levels.iter().map(|l| l.level).min().unwrap_or(1)
+        1
     }
 
-    /// Get maximum level number
+    /// Maximum level = flavors.len() + (effective_max - min).
     pub fn max_level(&self) -> u32 {
-        self.levels.iter().map(|l| l.level).max().unwrap_or(1)
+        let sc = &self.scaling;
+        sc.flavors.len() as u32 + (sc.instances.effective_max() - sc.instances.min)
     }
 
-    /// Determine if we should scale up based on current level and value
-    pub fn should_scale_up(&self, current_level: u32, value: f64) -> bool {
+    /// Look up a computed level by number.
+    pub fn get_computed_level(&self, n: u32) -> Option<ComputedLevel> {
+        self.compute_levels().into_iter().find(|l| l.level == n)
+    }
+
+    /// Scale up if ANY metric value exceeds its configured threshold.
+    pub fn should_scale_up(&self, current_level: u32, values: &HashMap<String, f64>) -> bool {
         if current_level >= self.max_level() {
-            return false; // Already at max, can't scale up
+            return false;
         }
-
-        if let Some(level_config) = self.get_level(current_level) {
-            if let Some(threshold) = level_config.scale_up_threshold {
-                return value > threshold;
-            }
-        }
-        false
+        self.scaling
+            .scale_up_threshold
+            .iter()
+            .any(|(metric, &threshold)| {
+                values.get(metric).map_or(false, |&v| v > threshold)
+            })
     }
 
-    /// Determine if we should scale down based on current level and value
-    pub fn should_scale_down(&self, current_level: u32, value: f64) -> bool {
+    /// Scale down if ALL metric values are below their configured thresholds.
+    pub fn should_scale_down(&self, current_level: u32, values: &HashMap<String, f64>) -> bool {
         if current_level <= self.min_level() {
-            return false; // Already at min, can't scale down
+            return false;
         }
-
-        if let Some(level_config) = self.get_level(current_level) {
-            if let Some(threshold) = level_config.scale_down_threshold {
-                return value < threshold;
-            }
+        let thresholds = &self.scaling.scale_down_threshold;
+        if thresholds.is_empty() {
+            return false;
         }
-        false
+        thresholds.iter().all(|(metric, &threshold)| {
+            values.get(metric).map_or(false, |&v| v < threshold)
+        })
     }
 }
 
@@ -373,32 +384,71 @@ impl Config {
                 )
                 .into());
             }
-            if probe.levels.is_empty() {
+            if probe.warpscript_files.is_empty() {
                 return Err(format!(
-                    "WarpScript probe '{}' must define at least one level",
+                    "WarpScript probe '{}': warpscript_file must define at least one metric",
                     probe.name
                 )
                 .into());
             }
-            let mut seen = std::collections::HashSet::new();
-            for level in &probe.levels {
-                if !seen.insert(level.level) {
+
+            let sc = &probe.scaling;
+
+            if sc.instances.min < 1 {
+                return Err(format!(
+                    "WarpScript probe '{}': instances.min must be >= 1",
+                    probe.name
+                )
+                .into());
+            }
+            if let Some(max) = sc.instances.max {
+                if max < sc.instances.min {
                     return Err(format!(
-                        "WarpScript probe '{}' has duplicate level number {}",
-                        probe.name, level.level
+                        "WarpScript probe '{}': instances.max ({}) must be >= instances.min ({})",
+                        probe.name, max, sc.instances.min
+                    )
+                    .into());
+                }
+            }
+            if sc.flavors.is_empty() {
+                return Err(format!(
+                    "WarpScript probe '{}': flavors must not be empty",
+                    probe.name
+                )
+                .into());
+            }
+
+            // Threshold keys must be a subset of warpscript_files keys
+            for key in sc.scale_up_threshold.keys() {
+                if !probe.warpscript_files.contains_key(key) {
+                    return Err(format!(
+                        "WarpScript probe '{}': scale_up_threshold key '{}' not found in warpscript_file",
+                        probe.name, key
+                    )
+                    .into());
+                }
+            }
+            for key in sc.scale_down_threshold.keys() {
+                if !probe.warpscript_files.contains_key(key) {
+                    return Err(format!(
+                        "WarpScript probe '{}': scale_down_threshold key '{}' not found in warpscript_file",
+                        probe.name, key
                     )
                     .into());
                 }
             }
 
-            // Levels are sorted after deserialisation; check for gaps
-            let min = probe.min_level();
-            let max = probe.max_level();
-            let expected_count = (max - min + 1) as usize;
-            if probe.levels.len() != expected_count {
+            if sc.upscale_command.is_empty() {
                 return Err(format!(
-                    "WarpScript probe '{}' levels must be contiguous (found gaps between {} and {})",
-                    probe.name, min, max
+                    "WarpScript probe '{}': upscale_command cannot be empty",
+                    probe.name
+                )
+                .into());
+            }
+            if sc.downscale_command.is_empty() {
+                return Err(format!(
+                    "WarpScript probe '{}': downscale_command cannot be empty",
+                    probe.name
                 )
                 .into());
             }
@@ -465,17 +515,15 @@ mod tests {
         let toml_content = r#"
             [[warpscript_probes]]
             name = "ws-only"
-            warpscript_file = "test.mc2"
+            warpscript_file = {cpu = "test.mc2"}
             interval_seconds = 60
 
-            [[warpscript_probes.levels]]
-            level = 1
-            scale_up_threshold = 70.0
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 2}
+            flavors = ["S", "M"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
             upscale_command = "scale up"
-
-            [[warpscript_probes.levels]]
-            level = 2
-            scale_down_threshold = 50.0
             downscale_command = "scale down"
         "#;
 
@@ -483,7 +531,7 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
-    fn warpscript_probe_toml(levels_block: &str) -> String {
+    fn warpscript_probe_toml(scaling_block: &str) -> String {
         format!(
             r#"
             [[healthcheck_probes]]
@@ -495,106 +543,165 @@ mod tests {
 
             [[warpscript_probes]]
             name = "ws"
-            warpscript_file = "test.mc2"
+            warpscript_file = {{cpu = "test.mc2"}}
             interval_seconds = 60
             {}
             "#,
-            levels_block
+            scaling_block
         )
     }
 
     #[test]
-    fn test_warpscript_level_singular() {
+    fn test_compute_levels_multi_flavor() {
+        // flavors=["S","M","L"], min=1, max=3 → 5 levels
         let toml = warpscript_probe_toml(
             r#"
-            [[warpscript_probes.levels]]
-            level = 1
-            scale_up_threshold = 70.0
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            flavors = ["S", "M", "L"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
             upscale_command = "scale up"
-
-            [[warpscript_probes.levels]]
-            level = 2
-            scale_down_threshold = 50.0
             downscale_command = "scale down"
             "#,
         );
         let mut config: Config = toml::from_str(&toml).unwrap();
         assert!(config.validate().is_ok());
-        assert_eq!(config.warpscript_probes[0].levels.len(), 2);
-        assert_eq!(config.warpscript_probes[0].levels[0].level, 1);
-        assert_eq!(config.warpscript_probes[0].levels[1].level, 2);
+
+        let probe = &config.warpscript_probes[0];
+        let levels = probe.compute_levels();
+        assert_eq!(levels.len(), 5);
+        assert_eq!(levels[0].level, 1); assert_eq!(levels[0].instances, 1); assert_eq!(levels[0].flavor, "S");
+        assert_eq!(levels[1].level, 2); assert_eq!(levels[1].instances, 1); assert_eq!(levels[1].flavor, "M");
+        assert_eq!(levels[2].level, 3); assert_eq!(levels[2].instances, 1); assert_eq!(levels[2].flavor, "L");
+        assert_eq!(levels[3].level, 4); assert_eq!(levels[3].instances, 2); assert_eq!(levels[3].flavor, "L");
+        assert_eq!(levels[4].level, 5); assert_eq!(levels[4].instances, 3); assert_eq!(levels[4].flavor, "L");
+        assert_eq!(probe.min_level(), 1);
+        assert_eq!(probe.max_level(), 5);
     }
 
     #[test]
-    fn test_warpscript_levels_plural_expands() {
+    fn test_compute_levels_mono_flavor() {
+        // flavors=["S"], min=1, max=3 → 3 levels
         let toml = warpscript_probe_toml(
             r#"
-            [[warpscript_probes.levels]]
-            level = 1
-            scale_up_threshold = 70.0
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            flavors = ["S"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
             upscale_command = "scale up"
-
-            [[warpscript_probes.levels]]
-            levels = [2, 3]
-            scale_down_threshold = 45.0
-            downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+            downscale_command = "scale down"
             "#,
         );
         let mut config: Config = toml::from_str(&toml).unwrap();
         assert!(config.validate().is_ok());
-        let levels = &config.warpscript_probes[0].levels;
+
+        let probe = &config.warpscript_probes[0];
+        let levels = probe.compute_levels();
         assert_eq!(levels.len(), 3);
-        assert_eq!(levels[1].level, 2);
-        assert_eq!(levels[2].level, 3);
-        assert_eq!(levels[1].scale_down_threshold, Some(45.0));
-        assert_eq!(levels[2].scale_down_threshold, Some(45.0));
-        assert_eq!(
-            levels[1].downscale_command.as_deref(),
-            Some("clever scale --app ${APP_ID} --flavor XS")
-        );
-        assert_eq!(
-            levels[2].downscale_command.as_deref(),
-            Some("clever scale --app ${APP_ID} --flavor XS")
-        );
+        assert_eq!(levels[0].level, 1); assert_eq!(levels[0].instances, 1); assert_eq!(levels[0].flavor, "S");
+        assert_eq!(levels[1].level, 2); assert_eq!(levels[1].instances, 2); assert_eq!(levels[1].flavor, "S");
+        assert_eq!(levels[2].level, 3); assert_eq!(levels[2].instances, 3); assert_eq!(levels[2].flavor, "S");
+        assert_eq!(probe.max_level(), 3);
     }
 
     #[test]
-    fn test_warpscript_level_and_levels_both_rejected() {
+    fn test_compute_levels_no_max() {
+        // flavors=["S","M"], min=1, max absent → 2 levels (no instance scaling)
         let toml = warpscript_probe_toml(
             r#"
-            [[warpscript_probes.levels]]
-            level = 1
-            levels = [1, 2]
+            [warpscript_probes.scaling]
+            instances = {min = 1}
+            flavors = ["S", "M"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
             "#,
         );
-        assert!(toml::from_str::<Config>(&toml).is_err());
-    }
-
-    #[test]
-    fn test_warpscript_neither_level_nor_levels_rejected() {
-        let toml = warpscript_probe_toml(
-            r#"
-            [[warpscript_probes.levels]]
-            scale_up_threshold = 70.0
-            "#,
-        );
-        assert!(toml::from_str::<Config>(&toml).is_err());
-    }
-
-    #[test]
-    fn test_warpscript_duplicate_level_rejected_by_validate() {
-        let toml = warpscript_probe_toml(
-            r#"
-            [[warpscript_probes.levels]]
-            level = 1
-
-            [[warpscript_probes.levels]]
-            levels = [1, 2]
-            "#,
-        );
-        // Deserialisation succeeds (duplicates not detected there), validate() catches it
         let mut config: Config = toml::from_str(&toml).unwrap();
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
+
+        let probe = &config.warpscript_probes[0];
+        let levels = probe.compute_levels();
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0].flavor, "S"); assert_eq!(levels[0].instances, 1);
+        assert_eq!(levels[1].flavor, "M"); assert_eq!(levels[1].instances, 1);
+        assert_eq!(probe.max_level(), 2);
+    }
+
+    #[test]
+    fn test_should_scale_up_any() {
+        let toml_content = r#"
+            [[warpscript_probes]]
+            name = "ws"
+            warpscript_file = {cpu = "test.mc2", memory = "mem.mc2"}
+            interval_seconds = 60
+
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            flavors = ["S", "M", "L"]
+            scale_up_threshold = {cpu = 70.0, memory = 80.0}
+            scale_down_threshold = {cpu = 40.0, memory = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
+        "#;
+        let mut config: Config = toml::from_str(toml_content).unwrap();
+        config.validate().unwrap();
+        let probe = &config.warpscript_probes[0];
+
+        // Only cpu exceeds threshold → should scale up (ANY)
+        let mut values = HashMap::new();
+        values.insert("cpu".to_string(), 75.0);
+        values.insert("memory".to_string(), 50.0);
+        assert!(probe.should_scale_up(1, &values));
+
+        // Neither exceeds threshold → no scale up
+        values.insert("cpu".to_string(), 60.0);
+        values.insert("memory".to_string(), 60.0);
+        assert!(!probe.should_scale_up(1, &values));
+
+        // At max level → no scale up even if above threshold
+        values.insert("cpu".to_string(), 90.0);
+        assert!(!probe.should_scale_up(probe.max_level(), &values));
+    }
+
+    #[test]
+    fn test_should_scale_down_all() {
+        let toml_content = r#"
+            [[warpscript_probes]]
+            name = "ws"
+            warpscript_file = {cpu = "test.mc2", memory = "mem.mc2"}
+            interval_seconds = 60
+
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            flavors = ["S", "M", "L"]
+            scale_up_threshold = {cpu = 70.0, memory = 80.0}
+            scale_down_threshold = {cpu = 40.0, memory = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
+        "#;
+        let mut config: Config = toml::from_str(toml_content).unwrap();
+        config.validate().unwrap();
+        let probe = &config.warpscript_probes[0];
+
+        // Both below threshold → should scale down (ALL)
+        let mut values = HashMap::new();
+        values.insert("cpu".to_string(), 30.0);
+        values.insert("memory".to_string(), 35.0);
+        assert!(probe.should_scale_down(2, &values));
+
+        // Only one below threshold → no scale down
+        values.insert("cpu".to_string(), 30.0);
+        values.insert("memory".to_string(), 50.0);
+        assert!(!probe.should_scale_down(2, &values));
+
+        // At min level → no scale down even if all below threshold
+        values.insert("cpu".to_string(), 20.0);
+        values.insert("memory".to_string(), 20.0);
+        assert!(!probe.should_scale_down(probe.min_level(), &values));
     }
 
     #[test]
@@ -613,16 +720,17 @@ mod tests {
     }
 
     #[test]
-    fn test_warpscript_non_contiguous_levels_rejected() {
+    fn test_validation_threshold_key_not_in_files() {
+        // scale_up_threshold references "ram" but warpscript_file only has "cpu"
         let toml = warpscript_probe_toml(
             r#"
-            [[warpscript_probes.levels]]
-            level = 1
-            scale_up_threshold = 70.0
-
-            [[warpscript_probes.levels]]
-            level = 3
-            scale_down_threshold = 50.0
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 2}
+            flavors = ["S"]
+            scale_up_threshold = {ram = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
             "#,
         );
         let mut config: Config = toml::from_str(&toml).unwrap();
@@ -630,19 +738,40 @@ mod tests {
     }
 
     #[test]
-    fn test_warpscript_contiguous_levels_accepted() {
+    fn test_validation_instances_max_less_than_min() {
         let toml = warpscript_probe_toml(
             r#"
-            [[warpscript_probes.levels]]
-            level = 2
-            scale_up_threshold = 70.0
-
-            [[warpscript_probes.levels]]
-            level = 3
-            scale_down_threshold = 50.0
+            [warpscript_probes.scaling]
+            instances = {min = 3, max = 1}
+            flavors = ["S"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
             "#,
         );
         let mut config: Config = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_multi_metric_warpscript_file() {
+        let toml_content = r#"
+            [[warpscript_probes]]
+            name = "Multi-Metric"
+            warpscript_file = {memory = "warpscript/ram.mc2", cpu = "warpscript/cpu.mc2"}
+            interval_seconds = 60
+
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            flavors = ["S", "M", "L"]
+            scale_up_threshold = {memory = 60.0, cpu = 60.0}
+            scale_down_threshold = {memory = 40.0, cpu = 40.0}
+            upscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+            downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+        "#;
+        let mut config: Config = toml::from_str(toml_content).unwrap();
         assert!(config.validate().is_ok());
+        assert_eq!(config.warpscript_probes[0].warpscript_files.len(), 2);
     }
 }

@@ -1,34 +1,21 @@
-// Example WarpScript to fetch CPU usage
-// The ${WARP_TOKEN} placeholder will be replaced with the actual token from WARP_TOKEN env var
-// The ${APP_ID} placeholder will be replaced with the specific app_id (e.g., 'app_frontend')
-
-// Set the token for authentication
 '${WARP_TOKEN}' 'token' STORE
-
-// Set the app_id for this probe instance
 '${APP_ID}' 'app' STORE
 
-// Define the time range (last 5 minutes)
-NOW 5 m -
+NOW 'NOW' STORE
 
-// Fetch CPU usage metric for this specific app
-// Adjust the class name and labels according to your actual metrics
-[
-  $token
-  'os.cpu'
-  { 'app_id' $app }  // Filter by this specific app_id
-  NOW 5 m -
-  NOW
-]
-FETCH
+2 m  'WIN'   STORE     // fenêtre courte = instances non up disparaissent
+1 m  'STEP'  STORE
 
-// Calculate the average CPU usage
-[ SWAP bucketizer.mean 0 1 0 ] BUCKETIZE
+[ $token 'cpu.usage_idle'
+  { 'app_id' $app }
+  $NOW $WIN
+] FETCH
 
-// Get the last value
+[ SWAP bucketizer.last $NOW $STEP 0 ] BUCKETIZE
+
+[ SWAP [ 'app_id' ] reducer.mean ] REDUCE
+
 0 GET
-VALUES 0 GET
-0 GET
-
-// The top of the stack should be a single numeric value (CPU percentage)
-// This value will be compared against the thresholds defined in the config
+VALUES
+DUP SIZE 1 - GET
+100 SWAP -

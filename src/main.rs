@@ -206,9 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // No apps: create a single probe as-is
             info!(
                 probe_name = %probe.name,
-                warpscript_file = %probe.warpscript_file,
                 interval_seconds = probe.interval_seconds,
-                levels_count = probe.levels.len(),
+                metrics_count = probe.warpscript_files.len(),
                 "Spawning WarpScript probe task"
             );
 
@@ -240,9 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     probe_name = %probe_instance.name,
                     app_id = %app.id,
                     has_custom_token = app.warp_token.is_some(),
-                    warpscript_file = %probe_instance.warpscript_file,
                     interval_seconds = probe_instance.interval_seconds,
-                    levels_count = probe_instance.levels.len(),
+                    metrics_count = probe_instance.warpscript_files.len(),
                     "Spawning WarpScript probe instance"
                 );
 

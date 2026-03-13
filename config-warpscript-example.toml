@@ -1,58 +1,81 @@
 # Example configuration for WarpScript-based auto-scaling probes
-# Requires environment variable:
-# - WARP_ENDPOINT: URL of Warp API (e.g., https://warp.example.com/api/v0/exec)
-# - WARP_TOKEN: (optional) Fallback token for apps without warp_token configured
+#
+# Required environment variables:
+#   WARP_ENDPOINT  URL of the Warp 10 exec API (e.g., https://warp.example.com/api/v0/exec)
+#   WARP_TOKEN     (optional) Fallback read token for apps without a per-app warp_token
+#
+# How levels are computed (no levels array needed):
+#
+#   Phase 1 — each flavor except the last gets one level at instances.min
+#   Phase 2 — the last flavor gets one level per instance count from min to max (inclusive)
+#
+#   flavors = ["S","M","L"], min=1, max=3  →  5 levels:
+#     Level 1: (S, 1 instance)
+#     Level 2: (M, 1 instance)
+#     Level 3: (L, 1 instance)
+#     Level 4: (L, 2 instances)
+#     Level 5: (L, 3 instances)
+#
+#   flavors = ["S"], min=1, max=3  →  3 levels:
+#     Level 1: (S, 1 instance)
+#     Level 2: (S, 2 instances)
+#     Level 3: (S, 3 instances)
+#
+#   flavors = ["S","M"], min=1 (no max)  →  2 levels (flavor scaling only):
+#     Level 1: (S, 1 instance)
+#     Level 2: (M, 1 instance)
+#
+# Scaling decision (evaluated each cycle, after acquiring the distributed lock):
+#   Scale UP   if ANY metric value > scale_up_threshold[metric]
+#   Scale DOWN if ALL metric values < scale_down_threshold[metric]
+#
+# Command substitution (upscale_command / downscale_command):
+#   ${APP_ID}   → app identifier (only when apps are configured)
+#   ${flavor}   → flavor name at the target level
+#   ${instances}→ instance count at the target level
 
-# Example 1: CPU-based auto-scaling with 3 levels and custom tokens per app
+# ---------------------------------------------------------------------------
+# Example 1: Single metric, flavor + instance scaling, multiple apps
+# ---------------------------------------------------------------------------
 [[warpscript_probes]]
 name = "CPU Auto-Scaler"
-warpscript_file = "warpscript/cpu_usage.mc2"
+# Inline TOML table: metric_name = "path/to/file.mc2"
+warpscript_file = {cpu = "warpscript/cpu_usage.mc2"}
 interval_seconds = 60
 command_timeout_seconds = 45
-# Optional: custom delay after scaling (defaults to interval_seconds)
-delay_after_scale_seconds = 120  # Wait 2 minutes after scaling before next check
+delay_after_scale_seconds = 120   # Wait 2 min after scaling before re-evaluating
 
-# Define apps with optional custom warp_token
 [[warpscript_probes.apps]]
 id = "app_frontend"
-warp_token = "READ_TOKEN_FOR_FRONTEND"  # Custom token for this app
+warp_token = "READ_TOKEN_FOR_FRONTEND"   # Per-app token (overrides WARP_TOKEN env var)
 
 [[warpscript_probes.apps]]
 id = "app_backend"
-# No warp_token: will use WARP_TOKEN env var as fallback
+# No warp_token: uses WARP_TOKEN env var
 
-# Level 1: Minimum scale (1 replica)
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 70.0          # If CPU > 70%, scale up to level 2
-# No scale_down_threshold needed (can't go below level 1)
-upscale_command = "kubectl scale deployment myapp --replicas=2"
-# downscale_command ignored at minimum level
+[warpscript_probes.scaling]
+instances = {min = 1, max = 3}
+flavors   = ["S", "M", "L"]   # 5 computed levels: (S,1),(M,1),(L,1),(L,2),(L,3)
 
-# Level 2: Medium scale (2 replicas)
-[[warpscript_probes.levels]]
-level = 2
-scale_up_threshold = 80.0          # If CPU > 80%, scale up to level 3
-scale_down_threshold = 50.0        # If CPU < 50%, scale down to level 1
-upscale_command = "kubectl scale deployment myapp --replicas=3"
-downscale_command = "kubectl scale deployment myapp --replicas=1"
+# Scale UP if cpu > 70%
+scale_up_threshold = {cpu = 70.0}
 
-# Level 3: Maximum scale (3 replicas)
-[[warpscript_probes.levels]]
-level = 3
-# No scale_up_threshold needed (already at max)
-scale_down_threshold = 60.0        # If CPU < 60%, scale down to level 2
-# upscale_command ignored at maximum level
-downscale_command = "kubectl scale deployment myapp --replicas=2"
+# Scale DOWN if cpu < 40%
+scale_down_threshold = {cpu = 40.0}
 
-# Example 2: Memory-based scaling with 4 levels using multiple apps
+# ${flavor} and ${instances} resolve to the computed level values
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+
+# ---------------------------------------------------------------------------
+# Example 2: Multi-metric scaling (OR for up, AND for down)
+# ---------------------------------------------------------------------------
 [[warpscript_probes]]
-name = "Memory Auto-Scaler"
-warpscript_file = "warpscript/memory_usage.mc2"
-interval_seconds = 120
-delay_after_scale_seconds = 180  # Wait 3 minutes after scaling
+name = "Multi-Metric Scaler"
+warpscript_file = {cpu = "warpscript/cpu.mc2", memory = "warpscript/mem.mc2"}
+interval_seconds = 60
+delay_after_scale_seconds = 180   # Wait 3 min after scaling
 
-# Each app can have its own token
 [[warpscript_probes.apps]]
 id = "app_frontend"
 warp_token = "TOKEN_FRONTEND"
@@ -61,171 +84,92 @@ warp_token = "TOKEN_FRONTEND"
 id = "app_backend"
 warp_token = "TOKEN_BACKEND"
 
-[[warpscript_probes.apps]]
-id = "app_worker"
-warp_token = "TOKEN_WORKER"
+[warpscript_probes.scaling]
+instances = {min = 1, max = 2}
+flavors   = ["S", "M", "L"]   # 4 levels: (S,1),(M,1),(L,1),(L,2)
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 60.0
-upscale_command = "clever scale --app ${APP_ID} --flavor S"
+# Scale UP if cpu > 70% OR memory > 80%  (ANY logic)
+scale_up_threshold = {cpu = 70.0, memory = 80.0}
 
-[[warpscript_probes.levels]]
-level = 2
-scale_up_threshold = 75.0
-scale_down_threshold = 45.0
-upscale_command = "clever scale --app ${APP_ID} --flavor M"
-downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+# Scale DOWN only if BOTH cpu < 40% AND memory < 50%  (ALL logic)
+scale_down_threshold = {cpu = 40.0, memory = 50.0}
 
-[[warpscript_probes.levels]]
-level = 3
-scale_up_threshold = 85.0
-scale_down_threshold = 55.0
-upscale_command = "clever scale --app ${APP_ID} --flavor L"
-downscale_command = "clever scale --app ${APP_ID} --flavor S"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
 
-[[warpscript_probes.levels]]
-level = 4
-scale_down_threshold = 65.0
-downscale_command = "clever scale --app ${APP_ID} --flavor M"
-
-# Example 3: Request rate based scaling
+# ---------------------------------------------------------------------------
+# Example 3: Instance-only scaling (single flavor)
+# ---------------------------------------------------------------------------
 [[warpscript_probes]]
 name = "Request Rate Scaler"
-warpscript_file = "warpscript/request_rate.mc2"
+warpscript_file = {rps = "warpscript/request_rate.mc2"}
 interval_seconds = 30
 delay_after_scale_seconds = 60
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 100.0  # > 100 req/s
-upscale_command = "kubectl scale deployment api --replicas=2"
+[warpscript_probes.scaling]
+instances = {min = 1, max = 4}   # 4 levels, all flavor "M"
+flavors   = ["M"]
 
-[[warpscript_probes.levels]]
-level = 2
-scale_up_threshold = 250.0  # > 250 req/s
-scale_down_threshold = 80.0 # < 80 req/s
-upscale_command = "kubectl scale deployment api --replicas=4"
-downscale_command = "kubectl scale deployment api --replicas=1"
+scale_up_threshold   = {rps = 100.0}   # > 100 req/s → scale up
+scale_down_threshold = {rps = 60.0}    # < 60 req/s  → scale down
 
-[[warpscript_probes.levels]]
-level = 3
-scale_up_threshold = 500.0  # > 500 req/s
-scale_down_threshold = 200.0  # < 200 req/s
-upscale_command = "kubectl scale deployment api --replicas=8"
-downscale_command = "kubectl scale deployment api --replicas=2"
+upscale_command   = "kubectl scale deployment api --replicas=${instances}"
+downscale_command = "kubectl scale deployment api --replicas=${instances}"
 
-[[warpscript_probes.levels]]
-level = 4
-scale_down_threshold = 400.0  # < 400 req/s
-downscale_command = "kubectl scale deployment api --replicas=4"
-
-# Example 4: Shared thresholds across multiple levels using `levels = [N, M, ...]`
-# When several levels share identical thresholds and commands, use the plural
-# `levels` key to avoid repeating the same block.
-#
-# Before (verbose):
-#   [[warpscript_probes.levels]]
-#   level = 2
-#   scale_down_threshold = 45.0
-#   downscale_command = "clever scale --app ${APP_ID} --flavor XS"
-#
-#   [[warpscript_probes.levels]]
-#   level = 3
-#   scale_down_threshold = 45.0
-#   downscale_command = "clever scale --app ${APP_ID} --flavor XS"
-#
-# After (compact):
-#   [[warpscript_probes.levels]]
-#   levels = [2, 3]
-#   scale_down_threshold = 45.0
-#   downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+# ---------------------------------------------------------------------------
+# Example 4: Flavor-only scaling (fixed instance count)
+# ---------------------------------------------------------------------------
 [[warpscript_probes]]
-name = "Compact Scaler"
-warpscript_file = "warpscript/cpu_usage.mc2"
+name = "Flavor-Only Scaler"
+warpscript_file = {cpu = "warpscript/cpu.mc2"}
 interval_seconds = 60
-delay_after_scale_seconds = 120
+delay_after_scale_seconds = 90
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 60.0
-upscale_command = "clever scale --app ${APP_ID} --flavor S"
+[warpscript_probes.scaling]
+instances = {min = 2}   # No max → effective_max = min = 2, no instance scaling
+flavors   = ["XS", "S", "M", "L"]   # 4 levels, always 2 instances
 
-# Levels 2 and 3 share the same downscale threshold and command
-# (both scale all the way back to XS when under load)
-[[warpscript_probes.levels]]
-levels = [2, 3]
-scale_down_threshold = 45.0
-downscale_command = "clever scale --app ${APP_ID} --flavor XS"
+scale_up_threshold   = {cpu = 65.0}
+scale_down_threshold = {cpu = 35.0}
 
-[[warpscript_probes.levels]]
-level = 4
-scale_down_threshold = 65.0
-downscale_command = "clever scale --app ${APP_ID} --flavor M"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances 2"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances 2"
 
-# Example 5 : Failure retry avec on_failure_command et delays configurables
-# "Échec de la sonde" = l'appel HTTP à l'API Warp10 a échoué,
-# le script a retourné une erreur, ou la réponse n'est pas parseable.
-# Cela n'a rien à voir avec les seuils de scaling.
+# ---------------------------------------------------------------------------
+# Example 5: on_failure_command with configurable retry and delays
+#
+# "Probe failure" = WarpScript HTTP call failed, script returned an error,
+# or the response could not be parsed.  It has nothing to do with scaling thresholds.
+# ---------------------------------------------------------------------------
 [[warpscript_probes]]
 name = "Resilient CPU Scaler"
-warpscript_file = "warpscript/cpu_usage.mc2"
+warpscript_file = {cpu = "warpscript/cpu_usage.mc2"}
 interval_seconds = 60
 command_timeout_seconds = 30
 
-# Déclenche la commande après 2 failures consécutifs (au 3ème).
-# Par défaut : 0 = déclenche dès le 1er échec.
+# Trigger on_failure_command after 2 consecutive failures (i.e., on the 3rd).
+# Default (0) = trigger on the very first failure.
 failure_retries_before_command = 2
 
-# Commande de remédiation. ${APP_ID} est substitué si apps est configuré.
+# Remediation command. ${APP_ID} is substituted if apps is configured.
 on_failure_command = "curl -s https://ops.example.com/alert?probe=${APP_ID}"
 
-# Délai avant le prochain cycle si on_failure_command a réussi (exit 0).
-# Par défaut : interval_seconds.
+# Delay before the next cycle when on_failure_command exits 0. Default: interval_seconds.
 delay_after_command_success_seconds = 300
 
-# Délai avant le prochain cycle si on_failure_command a échoué (exit non-0 ou erreur spawn).
-# Par défaut : interval_seconds.
+# Delay before the next cycle when on_failure_command exits non-zero. Default: interval_seconds.
 delay_after_command_failure_seconds = 60
 
 [[warpscript_probes.apps]]
 id = "app_frontend"
 warp_token = "READ_TOKEN_FRONTEND"
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 70.0
-upscale_command = "kubectl scale deployment frontend --replicas=2"
+[warpscript_probes.scaling]
+instances = {min = 1, max = 2}
+flavors   = ["S", "M"]
 
-[[warpscript_probes.levels]]
-level = 2
-scale_down_threshold = 50.0
-downscale_command = "kubectl scale deployment frontend --replicas=1"
+scale_up_threshold   = {cpu = 70.0}
+scale_down_threshold = {cpu = 45.0}
 
-# How it works:
-# 1. WarpScript executes periodically and returns a numeric value
-# 2. The value is compared against thresholds of the CURRENT level
-# 3. If value > scale_up_threshold of current level → UPSCALE (level++)
-#    - Execute upscale_command of current level
-#    - Move to next level (current_level + 1)
-# 4. If value < scale_down_threshold of current level → DOWNSCALE (level--)
-#    - Execute downscale_command of current level
-#    - Move to previous level (current_level - 1)
-# 5. At min level (1): downscale is ignored
-# 6. At max level (N): upscale is ignored
-# 7. Current level is persisted in Redis/memory
-
-# Scaling strategy tips:
-# - Set scale_down_threshold lower than scale_up_threshold to avoid flapping
-# - Use delay_after_scale_seconds to stabilize after scaling actions
-# - Define clear hysteresis between thresholds (e.g., up at 70%, down at 50%)
-#
-# Application Configuration (apps):
-# - Define a list of applications to avoid duplicating configuration
-# - Each app automatically creates an independent probe instance
-# - Each instance has its own name (e.g., "CPU Auto-Scaler - app_frontend")
-# - Each instance maintains its own state and current level
-# - Each app can have its own warp_token (optional, falls back to WARP_TOKEN env var)
-# - In WarpScript files: ${APP_ID} is replaced with the specific app id
-# - In commands: ${APP_ID} is replaced with the specific app id
-# - This is like a template that expands into multiple independent probes
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances ${instances}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances ${instances}"

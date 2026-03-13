@@ -10,6 +10,7 @@ A Rust application that periodically checks HTTP endpoints and executes shell co
 - [Installation](#installation)
 - [Usage](#usage)
 - [Dry Run Mode](#dry-run-mode)
+- [Multi-Instance Mode](#multi-instance-mode)
 - [Configuration](#configuration)
   - [Healthcheck Probes](#healthcheck-probes)
   - [WarpScript Probes](#warpscript-probes-auto-scaling)
@@ -38,11 +39,11 @@ A Rust application that periodically checks HTTP endpoints and executes shell co
 - **Configurable Delays** — independent wait times after success, failure, command success, command failure
 - **Multiple Apps per Probe** — expand one probe definition into N independent instances via `apps`; `${APP_ID}` is substituted in commands and WarpScript files
 - **WarpScript Probes** — query a Warp 10 platform, compare the numeric result to configurable thresholds, and fire scale-up / scale-down shell commands
-  - Multi-level scaling (1 … N levels, contiguous, no gaps)
-  - Per-level thresholds and commands
-  - `levels = [N, M, …]` shorthand to share identical config across multiple levels
-  - WarpScript file read once at startup then cached; retry loop if the file is not yet available at launch
-  - `${WARP_TOKEN}` and `${APP_ID}` substitution inside the WarpScript file
+  - **Multi-metric support** — one probe can query several WarpScript files simultaneously; scale UP if ANY metric exceeds its threshold, scale DOWN if ALL metrics are below their thresholds
+  - **Computed levels** — levels are derived automatically from a `flavors` list and an `instances` range; no need to enumerate level entries manually
+  - **Flavor + instance scaling** — each level maps to a (flavor, instances) pair; `${flavor}` and `${instances}` are substituted in commands
+  - WarpScript files read once at startup then cached; retry loop if a file is not yet available at launch
+  - `${WARP_TOKEN}` and `${APP_ID}` substitution inside WarpScript files
   - Per-app optional `warp_token`; falls back to the `WARP_TOKEN` environment variable
   - `WARP_ENDPOINT` and `WARP_TOKEN` resolved once per probe task before the polling loop
 - **Process Group Cleanup** — on timeout, the entire process group is killed (Linux/macOS), including pipelines and sub-shells
@@ -51,7 +52,7 @@ A Rust application that periodically checks HTTP endpoints and executes shell co
 - **Liveness Endpoint** — optional HTTP server for meta-monitoring
 - **State Persistence** — in-memory (default) or Redis; survives restarts
 - **Dry Run Mode** — `--dry-run` flag executes all probes and persists state, but skips all remediation commands; safe for config validation and threshold tuning
-- **Multi-Instance Mode** — `--multi-instance` (or `MULTI_INSTANCE=true`) enforces that Redis is available; the process exits fatally on connection failure instead of silently falling back to in-memory, preventing split-brain across replicas
+- **Multi-Instance Mode** — `--multi-instance` (or `MULTI_INSTANCE=true`) enforces that Redis is available; the process exits fatally on connection failure instead of silently falling back to in-memory, preventing split-brain across replicas; after acquiring the distributed lock, each instance refreshes its state from Redis before making scaling decisions, guaranteeing convergence
 - **Bounded Response Body Reads** — HTTP responses are read chunk-by-chunk and capped at 1 MiB; a gigantic response body never causes unbounded memory consumption
 - **Credential Sanitisation in Logs** — all URLs (Redis, HTTP endpoints) are sanitised before logging; `://user:PASSWORD@host` credentials are masked as `****` regardless of scheme
 - **Structured Logging** — `tracing`-based, configurable via `RUST_LOG`
@@ -153,7 +154,7 @@ When a command would have been executed, a `WARN` log is emitted instead:
 
 ```
 WARN probe_name="my-api" command="systemctl restart my-service" DRY RUN: skipping failure command
-WARN probe_name="cpu-scaler" command="clever scale --app app1 --min-instances 2" from_level=1 to_level=2 DRY RUN: skipping upscale command
+WARN probe_name="cpu-scaler" command="clever scale --app app1 --flavor M --instances 2" from_level=1 to_level=2 DRY RUN: skipping upscale command
 ```
 
 ### Behaviour details
@@ -198,6 +199,22 @@ If Redis is unreachable, the process prints an error message and exits with code
 Fatal: Redis connection failed in multi-instance mode: …
 ```
 
+Additionally, if Redis is configured but `--multi-instance` is not set, a `WARN` is logged to encourage the operator to opt in:
+
+```
+WARN Redis is configured but --multi-instance is not set. If running multiple replicas, add --multi-instance …
+```
+
+### State synchronisation across instances
+
+After each successful lock acquisition, the winner **re-reads its state from Redis** before making any scaling decision. This prevents the stale-read problem that would arise if instance A scaled to level 3 and saved it while instance B still held level 2 in local memory. Observable in logs:
+
+```
+INFO probe_name="cpu-scaler" stale=2 fresh=3 State refreshed from Redis after lock acquisition
+```
+
+The refresh is best-effort: if Redis is temporarily unreachable at that precise moment, the instance continues with its local state (degraded but non-blocking).
+
 ### Requirements and constraints
 
 | Condition | `--multi-instance` absent | `--multi-instance` present |
@@ -227,26 +244,24 @@ interval_seconds = 60
 expected_status = 200
 ```
 
-A minimal valid config with only WarpScript probes (no healthcheck probes):
+A minimal valid config with only a WarpScript probe:
 
 ```toml
 [[warpscript_probes]]
 name = "CPU Scaler"
-warpscript_file = "cpu.mc2"
+warpscript_file = {cpu = "warpscript/cpu.mc2"}
 interval_seconds = 60
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 70.0
-upscale_command = "kubectl scale deployment myapp --replicas=2"
-
-[[warpscript_probes.levels]]
-level = 2
-scale_down_threshold = 50.0
-downscale_command = "kubectl scale deployment myapp --replicas=1"
+[warpscript_probes.scaling]
+instances  = {min = 1, max = 2}
+flavors    = ["S", "M"]
+scale_up_threshold   = {cpu = 70.0}
+scale_down_threshold = {cpu = 40.0}
+upscale_command   = "kubectl scale deployment myapp --replicas=${instances}"
+downscale_command = "kubectl scale deployment myapp --replicas=${instances}"
 ```
 
-See `config.example.toml` and `config-warpscript-example.toml` for complete annotated examples.
+See `config.example.toml` for annotated healthcheck examples.
 
 ---
 
@@ -358,7 +373,7 @@ App fields:
 
 ### WarpScript Probes (Auto-Scaling)
 
-Execute a WarpScript query against a Warp 10 platform and automatically scale applications based on the returned numeric value.
+Execute WarpScript queries against a Warp 10 platform and automatically scale applications based on the returned numeric values.
 
 #### Required Environment Variables
 
@@ -372,15 +387,34 @@ export WARP_TOKEN="your-read-token"
 
 `WARP_ENDPOINT` is validated at startup and logged only at `debug` level. `WARP_TOKEN` and per-app `warp_token` values are never logged. Both are resolved once per probe task before the polling loop starts.
 
-#### Configuration Example
+#### Configuration Overview
+
+A WarpScript probe is structured around three keys:
+
+1. **`warpscript_file`** — inline TOML table mapping metric names to `.mc2` file paths
+2. **`[warpscript_probes.scaling]`** — block defining how levels are computed and which commands to run
+3. **`[[warpscript_probes.apps]]`** — optional list of app instances sharing this probe's configuration
 
 ```toml
 [[warpscript_probes]]
 name = "CPU Auto-Scaler"
-warpscript_file = "warpscript/cpu_usage.mc2"
+
+# Inline table: metric_name = "path/to/file.mc2"
+# Single metric:
+warpscript_file = {cpu = "warpscript/cpu.mc2"}
+# Multiple metrics (scale up on ANY, scale down on ALL):
+# warpscript_file = {cpu = "warpscript/cpu.mc2", memory = "warpscript/mem.mc2"}
+
 interval_seconds = 60
 command_timeout_seconds = 45
+request_timeout_seconds = 30
 delay_after_scale_seconds = 120
+
+# Optional failure handling
+on_failure_command = "curl -s https://ops.example.com/alert?probe=${APP_ID}"
+failure_retries_before_command = 2
+delay_after_command_success_seconds = 300
+delay_after_command_failure_seconds = 60
 
 [[warpscript_probes.apps]]
 id = "app_frontend"
@@ -390,30 +424,49 @@ warp_token = "READ_TOKEN_FRONTEND"   # Overrides WARP_TOKEN env var for this app
 id = "app_backend"
 # No warp_token: uses WARP_TOKEN env var
 
-[[warpscript_probes.levels]]
-level = 1
-scale_up_threshold = 70.0
-upscale_command = "clever scale --app ${APP_ID} --min-instances 2"
+[warpscript_probes.scaling]
+# Instance range for the last flavor
+instances = {min = 1, max = 3}
 
-[[warpscript_probes.levels]]
-level = 2
-scale_up_threshold = 85.0
-scale_down_threshold = 50.0
-upscale_command = "clever scale --app ${APP_ID} --min-instances 3"
-downscale_command = "clever scale --app ${APP_ID} --min-instances 1"
+# Ordered list of flavors (smallest to largest)
+flavors = ["S", "M", "L"]
 
-[[warpscript_probes.levels]]
-level = 3
-scale_down_threshold = 60.0
-downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
+# Scale UP if ANY of these values exceed their threshold
+scale_up_threshold = {cpu = 70.0}
+
+# Scale DOWN if ALL of these values are below their threshold
+scale_down_threshold = {cpu = 40.0}
+
+# ${flavor} and ${instances} are substituted from the computed level
+# ${APP_ID} is substituted if apps are configured
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
 ```
+
+#### Level Computation
+
+Levels are derived automatically from `flavors` and `instances`. There is no explicit `levels` array to maintain.
+
+**Algorithm:**
+- **Phase 1** — each flavor except the last gets one level at `instances.min`
+- **Phase 2** — the last flavor gets one level per instance count from `instances.min` to `instances.max` (inclusive)
+
+**Examples:**
+
+| `flavors` | `instances` | Computed levels |
+|-----------|-------------|-----------------|
+| `["S","M","L"]` | `min=1, max=3` | 5 levels: (S,1) → (M,1) → (L,1) → (L,2) → (L,3) |
+| `["S"]` | `min=1, max=3` | 3 levels: (S,1) → (S,2) → (S,3) |
+| `["S","M"]` | `min=1` (no max) | 2 levels: (S,1) → (M,1) — no instance scaling |
+
+At level N, the `${flavor}` and `${instances}` placeholders in commands resolve to the corresponding computed values.
 
 #### Probe Parameters
 
 | Key | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `name` | yes | — | Unique descriptive name |
-| `warpscript_file` | yes | — | Path to the `.mc2` file. Read once at startup (with retry); restart required to pick up changes. |
+| `warpscript_file` | yes | — | Inline TOML table mapping metric names to `.mc2` file paths. Must define at least one metric. |
 | `interval_seconds` | yes | — | Default interval between executions. Must be > 0. |
 | `request_timeout_seconds` | no | `30` | HTTP request timeout for WarpScript API calls (seconds) |
 | `command_timeout_seconds` | no | `30` | Maximum execution time for scaling and failure commands (seconds) |
@@ -424,6 +477,18 @@ downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 | `delay_after_command_failure_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits non-zero or fails to spawn |
 | `apps` | no | `[]` | List of apps to manage; each creates an independent probe instance |
 
+#### Scaling Parameters (`[warpscript_probes.scaling]`)
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `instances.min` | yes | Minimum instance count. Must be ≥ 1. |
+| `instances.max` | no | Maximum instance count for the last flavor. If absent, defaults to `min` (no instance scaling, only flavor scaling). Must be ≥ `min`. |
+| `flavors` | yes | Ordered list of flavor names (e.g. `["S", "M", "L"]`). Must not be empty. |
+| `scale_up_threshold` | no | Inline TOML table `{metric = value, …}`. Scale UP if ANY metric value exceeds its threshold. Keys must be present in `warpscript_file`. |
+| `scale_down_threshold` | no | Inline TOML table `{metric = value, …}`. Scale DOWN if ALL metric values are below their thresholds. Keys must be present in `warpscript_file`. |
+| `upscale_command` | yes | Shell command executed when scaling up. Must not be empty. |
+| `downscale_command` | yes | Shell command executed when scaling down. Must not be empty. |
+
 #### App Parameters (WarpScript)
 
 | Key | Required | Description |
@@ -431,60 +496,22 @@ downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 | `id` | yes | Identifier substituted as `${APP_ID}` in the script and commands. Only alphanumeric, `-`, `_`, `.` allowed. |
 | `warp_token` | no | Per-app read token. Overrides the `WARP_TOKEN` env var. If neither is set, the cycle is skipped with an error log. |
 
-#### Level Parameters
-
-At least one level must be defined. Level numbers must be unique and contiguous (no gaps).
-
-| Key | Required | Description |
-|-----|----------|-------------|
-| `level` | yes* | Single level number — use `level = N` |
-| `levels` | yes* | Multiple level numbers — use `levels = [N, M, …]` for levels sharing identical config |
-| `scale_up_threshold` | no | If the metric value exceeds this, scale up. Ignored at the maximum level. |
-| `scale_down_threshold` | no | If the metric value drops below this, scale down. Ignored at the minimum level. |
-| `upscale_command` | no | Shell command executed when scaling up from this level. **If absent and an upscale is triggered, the transition is blocked and a `WARN` is logged.** Use `upscale_command = "true"` for a deliberate no-op. |
-| `downscale_command` | no | Shell command executed when scaling down from this level. **If absent and a downscale is triggered, the transition is blocked and a `WARN` is logged.** Use `downscale_command = "true"` for a deliberate no-op. |
-
-*`level` and `levels` are mutually exclusive; exactly one must be present per entry.
-
-#### Sharing Config Across Multiple Levels
-
-When consecutive levels share identical thresholds and commands, use `levels = [N, M, …]`:
-
-```toml
-# Before (verbose — two identical blocks)
-[[warpscript_probes.levels]]
-level = 2
-scale_down_threshold = 45.0
-downscale_command = "clever scale --app ${APP_ID} --flavor XS"
-
-[[warpscript_probes.levels]]
-level = 3
-scale_down_threshold = 45.0
-downscale_command = "clever scale --app ${APP_ID} --flavor XS"
-
-# After (compact)
-[[warpscript_probes.levels]]
-levels = [2, 3]
-scale_down_threshold = 45.0
-downscale_command = "clever scale --app ${APP_ID} --flavor XS"
-```
-
-Level entries are sorted by level number after deserialization, regardless of declaration order.
-
 #### How Scaling Works
 
-1. `WARP_ENDPOINT`, `WARP_TOKEN`, and the WarpScript file are resolved once per probe task before the polling loop.
-   - If the script file is not readable at startup (e.g., not yet mounted), the probe retries every `interval_seconds` until it succeeds. The task does not die.
-2. At each interval, `${WARP_TOKEN}` and `${APP_ID}` are substituted into the cached script, and it is sent via HTTP POST to `WARP_ENDPOINT`.
-3. The last element of the JSON response array is used as the metric value (must be a number).
-4. The value is compared against the **current level's** thresholds:
-   - `value > scale_up_threshold` → execute `upscale_command`, increment level (if the command succeeds). If `upscale_command` is absent for this level, the transition is **blocked**: a `WARN` is logged and the level is not updated. Configure `upscale_command = "true"` for a deliberate no-op.
-   - `value < scale_down_threshold` → execute `downscale_command`, decrement level (if the command succeeds). If `downscale_command` is absent for this level, the transition is **blocked**: a `WARN` is logged and the level is not updated. Configure `downscale_command = "true"` for a deliberate no-op.
+1. `WARP_ENDPOINT`, `WARP_TOKEN`, and all WarpScript files are resolved once per probe task before the polling loop.
+   - If any script file is not readable at startup (e.g., not yet mounted), the probe retries every `interval_seconds` until all files are loaded. The task does not die.
+2. At each interval, the probe acquires the distributed lock (if Redis is configured). Only one instance proceeds; others skip the cycle.
+3. **After acquiring the lock**, the instance re-reads its state from Redis to get the latest level saved by any previous holder. This prevents stale-level decisions in multi-instance deployments.
+4. `${WARP_TOKEN}` and `${APP_ID}` are substituted into each cached script, and it is sent via HTTP POST to `WARP_ENDPOINT`.
+5. The last element of the JSON response array is used as the metric value (must be a number).
+6. The values are compared against the thresholds:
+   - ANY `value > scale_up_threshold[metric]` → execute `upscale_command`, increment level (if the command succeeds)
+   - ALL `value < scale_down_threshold[metric]` (and the threshold map is non-empty) → execute `downscale_command`, decrement level (if the command succeeds)
    - Otherwise → no action, wait `interval_seconds`
-5. Boundaries: upscale is ignored at max level; downscale is ignored at min level.
-6. After any scaling action, wait `delay_after_scale_seconds` before the next check.
-7. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed. The next delay is then `delay_after_command_success_seconds` or `delay_after_command_failure_seconds` depending on the command's exit code. Without `on_failure_command`, the probe retries after `interval_seconds`.
-8. The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., max level was reduced), it is clamped to the minimum and a `WARN` is logged.
+7. Boundaries: upscale is ignored at max level; downscale is ignored at min level (level 1).
+8. After any scaling action, wait `delay_after_scale_seconds` before the next check.
+9. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed.
+10. The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., `flavors` was shortened), it is clamped to level 1 and a `WARN` is logged.
 
 #### Token Resolution
 
@@ -494,19 +521,53 @@ For each polling cycle:
 2. Else if `WARP_TOKEN` env var is set → use it.
 3. Else → log an error and skip the cycle; retry at the next interval.
 
+#### Command Substitution
+
+The following placeholders are substituted in `upscale_command` and `downscale_command`:
+
+| Placeholder | Replaced with |
+|-------------|---------------|
+| `${APP_ID}` | The app identifier (only when `apps` is configured) |
+| `${flavor}` | The flavor name at the **current** level (upscale) or **target** level (downscale) |
+| `${instances}` | The instance count at the **current** level (upscale) or **target** level (downscale) |
+
+For `on_failure_command`, only `${APP_ID}` is substituted.
+
+#### Multi-Metric Example
+
+```toml
+[[warpscript_probes]]
+name = "Multi-Metric Scaler"
+warpscript_file = {cpu = "warpscript/cpu.mc2", memory = "warpscript/mem.mc2"}
+interval_seconds = 60
+
+[warpscript_probes.scaling]
+instances = {min = 1, max = 3}
+flavors   = ["S", "M", "L"]
+
+# Scale UP if cpu > 70% OR memory > 80%
+scale_up_threshold = {cpu = 70.0, memory = 80.0}
+
+# Scale DOWN only if BOTH cpu < 40% AND memory < 50%
+scale_down_threshold = {cpu = 40.0, memory = 50.0}
+
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+```
+
 #### WarpScript File Format
 
-The script is a standard WarpScript (`.mc2`) file. Two substitutions are performed before each execution:
+Each script is a standard WarpScript (`.mc2`) file. Two substitutions are performed before each execution:
 
 | Placeholder | Replaced with |
 |-------------|---------------|
 | `${WARP_TOKEN}` | The effective token for this app (per-app or env fallback) |
 | `${APP_ID}` | The app identifier |
 
-The script must leave exactly one numeric value on the stack; the last element of the returned JSON array is used.
+Each script must leave exactly one numeric value on the stack; the last element of the returned JSON array is used.
 
 ```warpscript
-// warpscript/cpu_usage.mc2
+// warpscript/cpu.mc2
 '${WARP_TOKEN}' 'token' STORE
 '${APP_ID}'     'app'   STORE
 
@@ -526,11 +587,12 @@ The script must leave exactly one numeric value on the stack; the last element o
 
 #### Scaling Strategy Tips
 
-- **Hysteresis**: keep `scale_down_threshold` meaningfully below `scale_up_threshold` to avoid flapping (e.g., up at 70%, down at 50%).
+- **Hysteresis**: keep `scale_down_threshold` meaningfully below `scale_up_threshold` to avoid flapping (e.g., up at 70%, down at 40%).
 - **Cooldown**: use `delay_after_scale_seconds` to let the system stabilize before re-evaluating.
-- **Progressive thresholds**: use higher up-thresholds at higher levels (e.g., 70% → level 2, 85% → level 3).
-- **Script changes**: the WarpScript file is read once at startup. Restart the application to pick up edits.
-- **Explicit no-op commands**: if a level should change without running any external command (e.g., the boundary level where only one direction is possible and you want the counter to advance anyway), set `upscale_command = "true"` or `downscale_command = "true"`. Leaving the field absent intentionally **blocks** the transition to prevent silent state drift.
+- **Multi-metric AND logic for downscale**: requiring all metrics to be low before downscaling is conservative and avoids premature scale-down when only one dimension recovers.
+- **Script changes**: WarpScript files are read once at startup. Restart the application to pick up edits.
+- **Instance-only scaling** (single flavor): set `flavors = ["M"]` with `instances = {min = 1, max = 4}` to scale only instance count.
+- **Flavor-only scaling** (fixed instances): set `instances = {min = 2}` (no `max`) with multiple flavors.
 
 ---
 
@@ -558,7 +620,7 @@ on_failure_command = "clever scale --app ${APP_ID} --flavor S && clever restart 
 on_failure_command = "echo 'Alert' | mail -s 'App down' ops@example.com"
 ```
 
-`${APP_ID}` is substituted before the command is passed to the shell.
+`${APP_ID}` is substituted before the command is passed to the shell. In scaling commands, `${flavor}` and `${instances}` are also substituted.
 
 ### Timeout and Process Group Cleanup
 
@@ -593,7 +655,7 @@ Each probe instance saves its state after every execution. The state includes:
 | Last check success | ✓ | — |
 | Consecutive failure counter | ✓ | ✓ |
 | Current scaling level | — | ✓ |
-| Last metric value | — | ✓ |
+| Last metric values | — | ✓ |
 
 On startup, if a saved state is found and `next_check_timestamp` is in the future, the probe waits out the remaining delay before its first execution. This prevents duplicate checks immediately after a restart.
 
@@ -625,7 +687,9 @@ Redis keys used:
 - `poc-sonde:lock:warpscript:<probe-name>` — distributed lock (WarpScript probes)
 - `poc-sonde:lock:healthcheck:<probe-name>` — distributed lock (healthcheck probes)
 
-**Distributed lock token**: each lock acquisition generates a **UUID v4** token. The compare-and-delete release script (`GETDEL` via Lua) only removes the key if the stored token matches the caller's token. UUID v4 tokens are globally unique regardless of process PID or wall-clock time, which prevents a replica with PID 1 (common in containers) from accidentally stealing or releasing another instance's lock when two replicas start within the same second.
+**Distributed lock token**: each lock acquisition generates a **UUID v4** token. The compare-and-delete release script only removes the key if the stored token matches the caller's token. UUID v4 tokens are globally unique regardless of process PID or wall-clock time, which prevents a replica with PID 1 (common in containers) from accidentally stealing or releasing another instance's lock when two replicas start within the same second.
+
+**Multi-instance state synchronisation**: after acquiring the lock, the winning instance refreshes its in-memory state from Redis before evaluating thresholds. This guarantees that all instances converge on the same `current_level` even if one of them was dormant for several cycles. A `WARN` log is emitted if the fresh level differs from the stale local value.
 
 **Connection failure behaviour:**
 
@@ -634,11 +698,11 @@ Redis keys used:
 | Default (no flag) | Falls back to in-memory — `error` log, continues running |
 | `--multi-instance` | **Fatal exit (code 1)** — prevents split-brain |
 
-When running with the Redis backend, the distributed lock TTL is computed as `WARP_REQUEST_TIMEOUT_SECS (30) + command_timeout_seconds + 10` seconds, ensuring the lock outlives the longest possible execution even when `interval_seconds` is shorter than the HTTP timeout.
+When running with the Redis backend, the distributed lock TTL is computed as `request_timeout_seconds + command_timeout_seconds + 10` seconds, ensuring the lock outlives the longest possible execution even when `interval_seconds` is shorter than the HTTP timeout.
 
 ### Level Validation on Restart
 
-When a WarpScript probe restores its level from state and that level is no longer present in the current config (e.g., the maximum level was reduced), the level is automatically clamped to the configured minimum and a `warn` log entry is emitted. No manual cleanup is required.
+When a WarpScript probe restores its level from state and that level is no longer valid in the current config (e.g., `flavors` was shortened), the level is automatically clamped to level 1 and a `warn` log entry is emitted. No manual cleanup is required. The same clamping is applied when the level is refreshed from Redis mid-run.
 
 ---
 
@@ -696,6 +760,7 @@ Log format:
 | Probe results (success / failure) | `info` | |
 | Redis URL (masked) | `info` | Password replaced with `****` |
 | HTTP probe URLs | `info` / `debug` | Credentials masked if present (`://user:****@host`) |
+| State refreshed from Redis (level changed) | `info` | Emitted when fresh level ≠ stale local level |
 | Remediation actions (threshold reached, scaling detected, commands executed) | `warn` | Visible with `RUST_LOG=warn` |
 | Command exit codes on non-zero | `warn` | |
 | Command stderr (on non-zero exit) | `warn` | |
@@ -715,7 +780,7 @@ cargo test
 cargo test -- --nocapture
 
 # Single test
-cargo test test_warpscript_levels_plural_expands
+cargo test test_compute_levels_multi_flavor
 
 # With Redis feature
 cargo test --features redis-persistence
@@ -724,6 +789,20 @@ cargo test --features redis-persistence
 ```bash
 cargo clippy -- -D warnings
 ```
+
+### Manual Multi-Instance Test
+
+```bash
+# Terminal 1
+REDIS_URL=redis://localhost:6379 ./target/release/cc-sonde --config config.toml --multi-instance
+
+# Terminal 2
+REDIS_URL=redis://localhost:6379 ./target/release/cc-sonde --config config.toml --multi-instance
+```
+
+Observe that:
+- Only one instance logs `Executing WarpScript probe` per cycle (the lock winner)
+- After a scaling action by instance A, instance B logs `State refreshed from Redis after lock acquisition` with the updated level when it next wins the lock
 
 ---
 
@@ -736,23 +815,27 @@ cargo clippy -- -D warnings
 | `Probe '…' must have either 'url' or 'apps' configured` | Neither `url` nor `apps` specified for a healthcheck probe |
 | `Probe '…' cannot have both 'url' and 'apps' configured` | Both `url` and `apps` are set on the same probe |
 | `Probe '…': app id '…' contains invalid characters` | `id` contains characters other than alphanumeric, `-`, `_`, `.` |
-| `a scaling level entry must specify either level = N or levels = [N, …]` | WarpScript level block is missing both `level` and `levels` |
-| `a scaling level entry cannot specify both level and levels` | Both `level` and `levels` are present in the same level entry |
-| `WarpScript probe '…' has duplicate level number N` | Same level defined twice (including via `levels = [N, N]`) |
-| `WarpScript probe '…' levels must be contiguous` | Level numbers have gaps (e.g., `1` and `3` without `2`) |
+| `WarpScript probe '…': warpscript_file must define at least one metric` | `warpscript_file` is an empty table `{}` |
+| `WarpScript probe '…': scale_up_threshold key '…' not found in warpscript_file` | A threshold key references a metric not present in `warpscript_file` |
+| `WarpScript probe '…': flavors must not be empty` | `flavors = []` or the key is absent |
+| `WarpScript probe '…': instances.min must be >= 1` | `instances.min = 0` is not allowed |
+| `WarpScript probe '…': instances.max (N) must be >= instances.min (M)` | `max` is set to a value smaller than `min` |
+| `WarpScript probe '…': upscale_command cannot be empty` | `upscale_command = ""` is not allowed; use `"true"` for a deliberate no-op |
+| `WarpScript probe '…': downscale_command cannot be empty` | `downscale_command = ""` is not allowed; use `"true"` for a deliberate no-op |
+| `WarpScript probe '…' has invalid interval (must be > 0)` | `interval_seconds = 0` is not allowed; set a positive value |
 | `WARP_ENDPOINT environment variable not set` | Required env var missing when WarpScript probes are configured |
 | `No Warp token available …` | App has no `warp_token` and `WARP_TOKEN` env var is not set; that cycle is skipped |
 | `Failed to read WarpScript file, will retry` | File not found or permission error; the probe retries every `interval_seconds` |
 | WarpScript changes not reflected | The script is read once at startup; restart the application after editing the `.mc2` file |
-| Scaling level reset to minimum after restart | The previously persisted level is not in the current config; expected behaviour after reducing the number of levels |
+| Scaling level reset to minimum after restart | The previously persisted level is not in the current config; expected behaviour after reducing `flavors` or `instances.max` |
+| `${flavor}` / `${instances}` not substituted in command | Verify the placeholders are spelled exactly as shown; only `upscale_command` and `downscale_command` receive these substitutions |
+| Two instances diverge on `current_level` | Expected without Redis; with Redis and `--multi-instance`, state is synced after each lock acquisition — check logs for `State refreshed from Redis` |
 | Command times out but child processes keep running | Should not happen on Linux/macOS — the whole process group is killed. On other platforms, only `sh` is killed. |
 | `Redis URL provided but redis-persistence feature is not enabled` | Rebuild with `cargo build --features redis-persistence` |
 | Redis connection fails at startup | Without `--multi-instance`: falls back to in-memory (error log). With `--multi-instance`: fatal exit. Check `REDIS_URL` / `REDIS_HOST` and network reachability. |
 | `Fatal: Redis connection failed in multi-instance mode: …` | `--multi-instance` is active but Redis is unreachable. Fix the Redis config or remove `--multi-instance` for single-instance deployments. |
-| `WarpScript probe '…' has invalid interval (must be > 0)` | `interval_seconds = 0` is not allowed for WarpScript probes; set a positive value |
-| `REDIS_PASSWORD` with special characters breaks the Redis URL | Since audit round 5 this is handled automatically via percent-encoding; ensure you are running the current build |
-| Scaling level does not advance despite threshold being crossed | `upscale_command` / `downscale_command` is not configured for that level. Absent commands block level transitions to prevent state drift. Add `upscale_command = "true"` for a deliberate no-op. |
-| Background process started with `&` is killed immediately after command exits | Should not happen — the process group SIGKILL guard is disarmed on normal command completion. Verify you are running the current build (audit round 8 fix). |
+| `REDIS_PASSWORD` with special characters breaks the Redis URL | Handled automatically via percent-encoding; ensure you are running the current build |
+| Background process started with `&` is killed immediately after command exits | Should not happen — the process group SIGKILL guard is disarmed on normal command completion. |
 
 ---
 
@@ -760,10 +843,11 @@ cargo clippy -- -D warnings
 
 - **Privileges**: commands execute with the same OS privileges as the application. Consider running as a dedicated low-privilege user.
 - **`${APP_ID}` validation**: app IDs are validated at startup — only alphanumeric characters, `-`, `_`, and `.` are allowed. This prevents shell injection via the `${APP_ID}` placeholder.
+- **`${flavor}` and `${instances}`**: these are derived from the TOML config (flavor strings and integer counts), not from external inputs, so they do not introduce injection risk.
 - **Shell execution surface**: all commands are run via `sh -c` to support pipes and shell operators. The **content** of `on_failure_command`, `upscale_command`, and `downscale_command` is not otherwise validated and is the responsibility of the administrator who writes the configuration file. Only trusted administrators should have write access to the TOML file.
-- **Tokens in configuration**: prefer the `WARP_TOKEN` environment variable over inline `warp_token` values in the TOML file. Environment variables are not stored on disk and are less likely to be accidentally committed to version control or exposed in file system backups. Use inline `warp_token` only for local development or when environment variable injection is not available.
+- **Tokens in configuration**: prefer the `WARP_TOKEN` environment variable over inline `warp_token` values in the TOML file. Environment variables are not stored on disk and are less likely to be accidentally committed to version control or exposed in file system backups.
 - **Command logging**: command strings are only logged at `debug` level, as they may contain tokens or passwords. Run with `RUST_LOG=info` (the default) in production to avoid exposing them.
-- **URL credential sanitisation**: all URLs — Redis, WarpScript endpoints, and HTTP probe endpoints — are sanitised before being passed to the logger. Any `://user:PASSWORD@host` authority is masked as `://user:****@host`, regardless of scheme. This applies to both `info` and `debug` log levels.
+- **URL credential sanitisation**: all URLs — Redis, WarpScript endpoints, and HTTP probe endpoints — are sanitised before being passed to the logger. Any `://user:PASSWORD@host` authority is masked as `://user:****@host`, regardless of scheme.
 - **`WARP_ENDPOINT` logging**: logged only at `debug` level and sanitised; never logged at `info`.
 - **Redis passwords**: percent-encoded at URL construction time (so special characters do not corrupt the URL), then masked in all log output. The raw password is never written anywhere.
 - **stdout**: command stdout is never logged (it may contain sensitive data). Only stderr is logged, and only on non-zero exit.
