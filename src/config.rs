@@ -153,8 +153,12 @@ pub struct ScalingConfig {
     pub scale_down_threshold: HashMap<String, f64>,
     pub upscale_command: String,
     pub downscale_command: String,
-    /// Delay after scaling up or down
+    /// Delay after scaling up or down (fallback if specific fields are absent)
     pub delay_after_scale_seconds: Option<u64>,
+    /// Delay after a successful upscale (overrides delay_after_scale_seconds)
+    pub delay_after_upscale_seconds: Option<u64>,
+    /// Delay after a successful downscale (overrides delay_after_scale_seconds)
+    pub delay_after_downscale_seconds: Option<u64>,
 }
 
 /// A computed scaling level (not deserialised, generated at runtime from ScalingConfig).
@@ -170,9 +174,17 @@ impl WarpScriptProbe {
         self.request_timeout_seconds.unwrap_or(30)
     }
 
-    pub fn get_delay_after_scale(&self) -> u64 {
+    pub fn get_delay_after_upscale(&self) -> u64 {
         self.scaling
-            .delay_after_scale_seconds
+            .delay_after_upscale_seconds
+            .or(self.scaling.delay_after_scale_seconds)
+            .unwrap_or(self.interval_seconds)
+    }
+
+    pub fn get_delay_after_downscale(&self) -> u64 {
+        self.scaling
+            .delay_after_downscale_seconds
+            .or(self.scaling.delay_after_scale_seconds)
             .unwrap_or(self.interval_seconds)
     }
 
@@ -916,5 +928,76 @@ mod tests {
         let mut config: Config = toml::from_str(toml_content).unwrap();
         assert!(config.validate().is_ok());
         assert_eq!(config.warpscript_probes[0].warpscript_files.len(), 2);
+    }
+
+    fn probe_with_delays(
+        delay_after_scale: Option<u64>,
+        delay_after_upscale: Option<u64>,
+        delay_after_downscale: Option<u64>,
+    ) -> WarpScriptProbe {
+        let mut scaling_fields = String::new();
+        if let Some(v) = delay_after_scale {
+            scaling_fields.push_str(&format!("delay_after_scale_seconds = {}\n", v));
+        }
+        if let Some(v) = delay_after_upscale {
+            scaling_fields.push_str(&format!("delay_after_upscale_seconds = {}\n", v));
+        }
+        if let Some(v) = delay_after_downscale {
+            scaling_fields.push_str(&format!("delay_after_downscale_seconds = {}\n", v));
+        }
+        let toml = warpscript_probe_toml(&format!(
+            r#"
+            [warpscript_probes.scaling]
+            scale_up_threshold = {{cpu = 70.0}}
+            scale_down_threshold = {{cpu = 40.0}}
+            upscale_command = "up"
+            downscale_command = "down"
+            {}
+            "#,
+            scaling_fields
+        ));
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        config.warpscript_probes.remove(0)
+    }
+
+    #[test]
+    fn test_delay_none_falls_back_to_interval() {
+        // No delay fields set → both fall back to interval_seconds (60)
+        let probe = probe_with_delays(None, None, None);
+        assert_eq!(probe.get_delay_after_upscale(), 60);
+        assert_eq!(probe.get_delay_after_downscale(), 60);
+    }
+
+    #[test]
+    fn test_delay_after_scale_fallback() {
+        // Only delay_after_scale_seconds set → both use it
+        let probe = probe_with_delays(Some(120), None, None);
+        assert_eq!(probe.get_delay_after_upscale(), 120);
+        assert_eq!(probe.get_delay_after_downscale(), 120);
+    }
+
+    #[test]
+    fn test_delay_after_upscale_only() {
+        // Only delay_after_upscale_seconds set → upscale uses it, downscale falls back to interval
+        let probe = probe_with_delays(None, Some(300), None);
+        assert_eq!(probe.get_delay_after_upscale(), 300);
+        assert_eq!(probe.get_delay_after_downscale(), 60);
+    }
+
+    #[test]
+    fn test_delay_after_downscale_only() {
+        // Only delay_after_downscale_seconds set → downscale uses it, upscale falls back to interval
+        let probe = probe_with_delays(None, None, Some(30));
+        assert_eq!(probe.get_delay_after_upscale(), 60);
+        assert_eq!(probe.get_delay_after_downscale(), 30);
+    }
+
+    #[test]
+    fn test_delay_specific_override_fallback() {
+        // All three set → each specific field wins over delay_after_scale_seconds
+        let probe = probe_with_delays(Some(120), Some(300), Some(30));
+        assert_eq!(probe.get_delay_after_upscale(), 300);
+        assert_eq!(probe.get_delay_after_downscale(), 30);
     }
 }

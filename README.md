@@ -513,7 +513,9 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 | `scale_down_threshold` | no | Inline TOML table `{metric = value, …}`. Scale DOWN if ALL metric values are below their thresholds. Keys must be present in `warpscript_file`. |
 | `upscale_command` | yes | Shell command executed when scaling up. Must not be empty. |
 | `downscale_command` | yes | Shell command executed when scaling down. Must not be empty. |
-| `delay_after_scale_seconds` | no | Wait time (seconds) after any scaling action (up or down). Defaults to `interval_seconds`. |
+| `delay_after_scale_seconds` | no | Wait time (seconds) after upscale or downscale. Fallback if the specific fields below are absent. Defaults to `interval_seconds`. |
+| `delay_after_upscale_seconds` | no | Wait time (seconds) after a successful upscale. Overrides `delay_after_scale_seconds`. |
+| `delay_after_downscale_seconds` | no | Wait time (seconds) after a successful downscale. Overrides `delay_after_scale_seconds`. |
 
 `flavors` and `instances` must **both** be present (level-based) or **both** be absent (stateless). Specifying one without the other is rejected at startup.
 

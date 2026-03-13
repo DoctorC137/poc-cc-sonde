@@ -494,7 +494,7 @@ pub async fn schedule_warpscript_probe(
                 if !probe.is_stateless() {
                     current_level += 1;
                 }
-                next_delay = probe.get_delay_after_scale();
+                next_delay = probe.get_delay_after_upscale();
             } else {
                 warn!(
                     probe_name = %probe.name,
@@ -561,7 +561,7 @@ pub async fn schedule_warpscript_probe(
                 if !probe.is_stateless() {
                     current_level -= 1;
                 }
-                next_delay = probe.get_delay_after_scale();
+                next_delay = probe.get_delay_after_downscale();
             } else {
                 warn!(
                     probe_name = %probe.name,
