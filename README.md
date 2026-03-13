@@ -415,8 +415,13 @@ downscale_command = "clever scale --app ${APP_ID} --min-instances 2"
 | `name` | yes | — | Unique descriptive name |
 | `warpscript_file` | yes | — | Path to the `.mc2` file. Read once at startup (with retry); restart required to pick up changes. |
 | `interval_seconds` | yes | — | Default interval between executions. Must be > 0. |
-| `command_timeout_seconds` | no | `30` | Maximum execution time for scaling commands (seconds) |
+| `request_timeout_seconds` | no | `30` | HTTP request timeout for WarpScript API calls (seconds) |
+| `command_timeout_seconds` | no | `30` | Maximum execution time for scaling and failure commands (seconds) |
 | `delay_after_scale_seconds` | no | `interval_seconds` | Wait time after any scaling action (up or down) |
+| `on_failure_command` | no | — | Shell command to execute when the failure threshold is reached. `${APP_ID}` is substituted if `apps` is configured. |
+| `failure_retries_before_command` | no | `0` | Consecutive WarpScript failures tolerated before executing `on_failure_command` |
+| `delay_after_command_success_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits 0 |
+| `delay_after_command_failure_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits non-zero or fails to spawn |
 | `apps` | no | `[]` | List of apps to manage; each creates an independent probe instance |
 
 #### App Parameters (WarpScript)
@@ -478,7 +483,7 @@ Level entries are sorted by level number after deserialization, regardless of de
    - Otherwise → no action, wait `interval_seconds`
 5. Boundaries: upscale is ignored at max level; downscale is ignored at min level.
 6. After any scaling action, wait `delay_after_scale_seconds` before the next check.
-7. On WarpScript execution error, the current level is kept and the probe retries after `interval_seconds`.
+7. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed. The next delay is then `delay_after_command_success_seconds` or `delay_after_command_failure_seconds` depending on the command's exit code. Without `on_failure_command`, the probe retries after `interval_seconds`.
 8. The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., max level was reduced), it is clamped to the minimum and a `WARN` is logged.
 
 #### Token Resolution
@@ -586,7 +591,7 @@ Each probe instance saves its state after every execution. The state includes:
 | Last execution timestamp | ✓ | ✓ |
 | Next scheduled execution timestamp | ✓ | ✓ |
 | Last check success | ✓ | — |
-| Consecutive failure counter | ✓ | — |
+| Consecutive failure counter | ✓ | ✓ |
 | Current scaling level | — | ✓ |
 | Last metric value | — | ✓ |
 

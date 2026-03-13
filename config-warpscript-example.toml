@@ -163,6 +163,45 @@ level = 4
 scale_down_threshold = 65.0
 downscale_command = "clever scale --app ${APP_ID} --flavor M"
 
+# Example 5 : Failure retry avec on_failure_command et delays configurables
+# "Échec de la sonde" = l'appel HTTP à l'API Warp10 a échoué,
+# le script a retourné une erreur, ou la réponse n'est pas parseable.
+# Cela n'a rien à voir avec les seuils de scaling.
+[[warpscript_probes]]
+name = "Resilient CPU Scaler"
+warpscript_file = "warpscript/cpu_usage.mc2"
+interval_seconds = 60
+command_timeout_seconds = 30
+
+# Déclenche la commande après 2 failures consécutifs (au 3ème).
+# Par défaut : 0 = déclenche dès le 1er échec.
+failure_retries_before_command = 2
+
+# Commande de remédiation. ${APP_ID} est substitué si apps est configuré.
+on_failure_command = "curl -s https://ops.example.com/alert?probe=${APP_ID}"
+
+# Délai avant le prochain cycle si on_failure_command a réussi (exit 0).
+# Par défaut : interval_seconds.
+delay_after_command_success_seconds = 300
+
+# Délai avant le prochain cycle si on_failure_command a échoué (exit non-0 ou erreur spawn).
+# Par défaut : interval_seconds.
+delay_after_command_failure_seconds = 60
+
+[[warpscript_probes.apps]]
+id = "app_frontend"
+warp_token = "READ_TOKEN_FRONTEND"
+
+[[warpscript_probes.levels]]
+level = 1
+scale_up_threshold = 70.0
+upscale_command = "kubectl scale deployment frontend --replicas=2"
+
+[[warpscript_probes.levels]]
+level = 2
+scale_down_threshold = 50.0
+downscale_command = "kubectl scale deployment frontend --replicas=1"
+
 # How it works:
 # 1. WarpScript executes periodically and returns a numeric value
 # 2. The value is compared against thresholds of the CURRENT level

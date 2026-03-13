@@ -144,6 +144,16 @@ pub async fn schedule_warpscript_probe(
         }
     };
 
+    let mut consecutive_failures: u32 = previous_state
+        .as_ref()
+        .map(|s| s.consecutive_failures)
+        .unwrap_or(0);
+
+    let mut last_value: f64 = previous_state
+        .as_ref()
+        .map(|s| s.last_value)
+        .unwrap_or(0.0);
+
     // Resolve environment variables once before the loop (stable for process lifetime)
     let endpoint = match env::var("WARP_ENDPOINT") {
         Ok(v) => v,
@@ -260,21 +270,86 @@ pub async fn schedule_warpscript_probe(
                     current_level = current_level,
                     "WarpScript execution successful"
                 );
+                consecutive_failures = 0;
+                last_value = v;
                 v
             }
             Err(e) => {
+                consecutive_failures += 1;
                 error!(
                     probe_name = %probe.name,
                     error = %e,
+                    consecutive_failures,
                     "WarpScript execution failed"
                 );
+
+                next_delay = probe.interval_seconds;
+
+                if let Some(ref command) = probe.on_failure_command {
+                    let threshold = probe.get_failure_retries_before_command();
+                    if consecutive_failures > threshold {
+                        let cmd = if let Some(id) = app_id {
+                            command.replace("${APP_ID}", id)
+                        } else {
+                            command.clone()
+                        };
+                        warn!(
+                            probe_name = %probe.name,
+                            consecutive_failures,
+                            threshold,
+                            "Failure threshold reached, executing command"
+                        );
+                        if dry_run {
+                            warn!(
+                                probe_name = %probe.name,
+                                command = %cmd,
+                                "DRY RUN: skipping failure command"
+                            );
+                            next_delay = probe.get_delay_after_command_success();
+                        } else {
+                            match executor::execute_command(&cmd, probe.command_timeout_seconds).await {
+                                Ok(output) if output.status.success() => {
+                                    warn!(probe_name = %probe.name, "Failure command completed successfully");
+                                    next_delay = probe.get_delay_after_command_success();
+                                }
+                                Ok(_) => {
+                                    error!(probe_name = %probe.name, "Failure command completed with errors");
+                                    next_delay = probe.get_delay_after_command_failure();
+                                }
+                                Err(e) => {
+                                    error!(probe_name = %probe.name, error = %e, "Failed to execute failure command");
+                                    next_delay = probe.get_delay_after_command_failure();
+                                }
+                            }
+                        }
+                    } else {
+                        info!(
+                            probe_name = %probe.name,
+                            consecutive_failures,
+                            threshold,
+                            remaining = threshold - consecutive_failures,
+                            "Failure threshold not reached, retrying without command"
+                        );
+                    }
+                }
+
+                let state = WarpScriptProbeState {
+                    probe_name: probe.name.clone(),
+                    last_check_timestamp: check_timestamp,
+                    current_level,
+                    last_value,
+                    next_check_timestamp: check_timestamp + next_delay,
+                    consecutive_failures,
+                };
+                if let Err(e) = backend.save_warpscript_state(&state).await {
+                    error!(probe_name = %probe.name, error = %e, "Failed to save WarpScript state");
+                }
+
                 if let Some(ref token) = lock_token {
                     if let Err(e) = backend.release_lock(&lock_key, token).await {
                         debug!(probe_name = %probe.name, error = %e, "Failed to release lock (will expire via TTL)");
                     }
                 }
-                // On error, keep current level and retry after interval
-                next_delay = probe.interval_seconds;
                 continue;
             }
         };
@@ -409,6 +484,7 @@ pub async fn schedule_warpscript_probe(
             current_level,
             last_value: value,
             next_check_timestamp: check_timestamp + next_delay,
+            consecutive_failures,
         };
 
         if let Err(e) = backend.save_warpscript_state(&state).await {
