@@ -15,6 +15,8 @@ NOW 'NOW' STORE
 
 [ SWAP [ 'app_id' ] reducer.mean ] REDUCE
 
+DUP SIZE 0 == <% DROP 'memory: no data available yet' MSGFAIL %> IFT
 0 GET
 VALUES
+DUP SIZE 0 == <% DROP 'memory: no values in time window' MSGFAIL %> IFT
 DUP SIZE 1 - GET
