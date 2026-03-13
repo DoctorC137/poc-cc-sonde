@@ -74,18 +74,23 @@ pub async fn schedule_warpscript_probe(
         }
     };
 
-    info!(
-        probe_name = %probe.name,
-        interval_seconds = probe.interval_seconds,
-        metrics_count = probe.warpscript_files.len(),
-        min_level = probe.min_level(),
-        max_level = probe.max_level(),
-        "Starting WarpScript probe scheduler"
-    );
-
-    if probe.scaling.flavors.is_empty() {
-        error!(probe_name = %probe.name, "No flavors defined for WarpScript probe");
-        return;
+    let metrics_count = probe.warpscript_files.len();
+    if probe.is_stateless() {
+        info!(
+            probe_name = %probe.name,
+            interval_seconds = probe.interval_seconds,
+            metrics_count,
+            "Starting WarpScript probe scheduler (stateless mode)"
+        );
+    } else {
+        info!(
+            probe_name = %probe.name,
+            interval_seconds = probe.interval_seconds,
+            metrics_count,
+            min_level = probe.min_level(),
+            max_level = probe.max_level(),
+            "Starting WarpScript probe scheduler"
+        );
     }
 
     // Load previous state if exists
@@ -116,7 +121,9 @@ pub async fn schedule_warpscript_probe(
                 0
             };
             let loaded_level = state.current_level;
-            let current_level = if probe.get_computed_level(loaded_level).is_some() {
+            let current_level = if probe.is_stateless() {
+                probe.min_level()
+            } else if probe.get_computed_level(loaded_level).is_some() {
                 loaded_level
             } else {
                 let clamped = probe.min_level();
@@ -236,7 +243,9 @@ pub async fn schedule_warpscript_probe(
                 );
             }
             let loaded_level = fresh_state.current_level;
-            current_level = if probe.get_computed_level(loaded_level).is_some() {
+            current_level = if probe.is_stateless() {
+                probe.min_level()
+            } else if probe.get_computed_level(loaded_level).is_some() {
                 loaded_level
             } else {
                 let clamped = probe.min_level();
@@ -401,43 +410,63 @@ pub async fn schedule_warpscript_probe(
 
         // Determine scaling action
         if probe.should_scale_up(current_level, &metric_values) {
-            let new_level = current_level + 1;
-            warn!(
-                probe_name = %probe.name,
-                from_level = current_level,
-                to_level = new_level,
-                "Scaling UP detected"
-            );
-
-            let computed = probe.get_computed_level(current_level).unwrap();
             let cmd = &probe.scaling.upscale_command;
 
-            let command_ok = if dry_run {
+            let command_ok = if probe.is_stateless() {
+                warn!(probe_name = %probe.name, "Scaling UP detected (stateless)");
+                if dry_run {
+                    warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping upscale command");
+                    true
+                } else {
+                    execute_scaling_command(
+                        &probe.name,
+                        cmd,
+                        app_id,
+                        "",
+                        0,
+                        probe.command_timeout_seconds,
+                        "upscale",
+                    )
+                    .await
+                }
+            } else {
+                let new_level = current_level + 1;
                 warn!(
                     probe_name = %probe.name,
-                    command = %cmd,
-                    flavor = %computed.flavor,
-                    instances = computed.instances,
                     from_level = current_level,
                     to_level = new_level,
-                    "DRY RUN: skipping upscale command"
+                    "Scaling UP detected"
                 );
-                true
-            } else {
-                execute_scaling_command(
-                    &probe.name,
-                    cmd,
-                    app_id,
-                    &computed.flavor,
-                    computed.instances,
-                    probe.command_timeout_seconds,
-                    "upscale",
-                )
-                .await
+                let computed = probe.get_computed_level(current_level).unwrap();
+                if dry_run {
+                    warn!(
+                        probe_name = %probe.name,
+                        command = %cmd,
+                        flavor = %computed.flavor,
+                        instances = computed.instances,
+                        from_level = current_level,
+                        to_level = new_level,
+                        "DRY RUN: skipping upscale command"
+                    );
+                    true
+                } else {
+                    execute_scaling_command(
+                        &probe.name,
+                        cmd,
+                        app_id,
+                        &computed.flavor,
+                        computed.instances,
+                        probe.command_timeout_seconds,
+                        "upscale",
+                    )
+                    .await
+                }
             };
 
             if command_ok {
-                current_level = new_level;
+                if !probe.is_stateless() {
+                    current_level += 1;
+                }
                 next_delay = probe.get_delay_after_scale();
             } else {
                 warn!(
@@ -448,43 +477,63 @@ pub async fn schedule_warpscript_probe(
                 next_delay = probe.interval_seconds;
             }
         } else if probe.should_scale_down(current_level, &metric_values) {
-            let new_level = current_level - 1;
-            warn!(
-                probe_name = %probe.name,
-                from_level = current_level,
-                to_level = new_level,
-                "Scaling DOWN detected"
-            );
-
-            let computed = probe.get_computed_level(new_level).unwrap();
             let cmd = &probe.scaling.downscale_command;
 
-            let command_ok = if dry_run {
+            let command_ok = if probe.is_stateless() {
+                warn!(probe_name = %probe.name, "Scaling DOWN detected (stateless)");
+                if dry_run {
+                    warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping downscale command");
+                    true
+                } else {
+                    execute_scaling_command(
+                        &probe.name,
+                        cmd,
+                        app_id,
+                        "",
+                        0,
+                        probe.command_timeout_seconds,
+                        "downscale",
+                    )
+                    .await
+                }
+            } else {
+                let new_level = current_level - 1;
                 warn!(
                     probe_name = %probe.name,
-                    command = %cmd,
-                    flavor = %computed.flavor,
-                    instances = computed.instances,
                     from_level = current_level,
                     to_level = new_level,
-                    "DRY RUN: skipping downscale command"
+                    "Scaling DOWN detected"
                 );
-                true
-            } else {
-                execute_scaling_command(
-                    &probe.name,
-                    cmd,
-                    app_id,
-                    &computed.flavor,
-                    computed.instances,
-                    probe.command_timeout_seconds,
-                    "downscale",
-                )
-                .await
+                let computed = probe.get_computed_level(new_level).unwrap();
+                if dry_run {
+                    warn!(
+                        probe_name = %probe.name,
+                        command = %cmd,
+                        flavor = %computed.flavor,
+                        instances = computed.instances,
+                        from_level = current_level,
+                        to_level = new_level,
+                        "DRY RUN: skipping downscale command"
+                    );
+                    true
+                } else {
+                    execute_scaling_command(
+                        &probe.name,
+                        cmd,
+                        app_id,
+                        &computed.flavor,
+                        computed.instances,
+                        probe.command_timeout_seconds,
+                        "downscale",
+                    )
+                    .await
+                }
             };
 
             if command_ok {
-                current_level = new_level;
+                if !probe.is_stateless() {
+                    current_level -= 1;
+                }
                 next_delay = probe.get_delay_after_scale();
             } else {
                 warn!(

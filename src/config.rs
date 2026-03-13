@@ -144,8 +144,10 @@ impl InstanceRange {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScalingConfig {
-    pub instances: InstanceRange,
+    #[serde(default)]
+    pub instances: Option<InstanceRange>,
     /// Ordered list of flavors (e.g. ["S", "M", "L"])
+    #[serde(default)]
     pub flavors: Vec<String>,
     /// Thresholds to trigger upscale — scale up if ANY metric exceeds its threshold
     pub scale_up_threshold: HashMap<String, f64>,
@@ -187,6 +189,13 @@ impl WarpScriptProbe {
             .unwrap_or(self.interval_seconds)
     }
 
+    /// Returns true when neither `flavors` nor `instances` are configured.
+    /// In stateless mode the command fires every cycle the threshold is crossed,
+    /// without any level tracking.
+    pub fn is_stateless(&self) -> bool {
+        self.scaling.flavors.is_empty() && self.scaling.instances.is_none()
+    }
+
     /// Generate the ordered list of computed levels from flavors and instance range.
     ///
     /// Algorithm:
@@ -199,8 +208,9 @@ impl WarpScriptProbe {
     ///   flavors=["S","M"],     min=1, max=None → (1,S,1),(2,M,1)
     pub fn compute_levels(&self) -> Vec<ComputedLevel> {
         let sc = &self.scaling;
-        let min_inst = sc.instances.min;
-        let max_inst = sc.instances.effective_max();
+        let Some(ref inst) = sc.instances else { return vec![] };
+        let min_inst = inst.min;
+        let max_inst = inst.effective_max();
         let flavors = &sc.flavors;
         let mut levels = Vec::new();
         let mut level_num = 1u32;
@@ -235,10 +245,11 @@ impl WarpScriptProbe {
         1
     }
 
-    /// Maximum level = flavors.len() + (effective_max - min).
+    /// Maximum level = flavors.len() + (effective_max - min). Returns 0 in stateless mode.
     pub fn max_level(&self) -> u32 {
         let sc = &self.scaling;
-        sc.flavors.len() as u32 + (sc.instances.effective_max() - sc.instances.min)
+        let Some(ref inst) = sc.instances else { return 0 };
+        sc.flavors.len() as u32 + (inst.effective_max() - inst.min)
     }
 
     /// Look up a computed level by number.
@@ -248,7 +259,7 @@ impl WarpScriptProbe {
 
     /// Scale up if ANY metric value exceeds its configured threshold.
     pub fn should_scale_up(&self, current_level: u32, values: &HashMap<String, f64>) -> bool {
-        if current_level >= self.max_level() {
+        if !self.is_stateless() && current_level >= self.max_level() {
             return false;
         }
         self.scaling
@@ -261,7 +272,7 @@ impl WarpScriptProbe {
 
     /// Scale down if ALL metric values are below their configured thresholds.
     pub fn should_scale_down(&self, current_level: u32, values: &HashMap<String, f64>) -> bool {
-        if current_level <= self.min_level() {
+        if !self.is_stateless() && current_level <= self.min_level() {
             return false;
         }
         let thresholds = &self.scaling.scale_down_threshold;
@@ -393,29 +404,36 @@ impl Config {
             }
 
             let sc = &probe.scaling;
+            let is_stateless = probe.is_stateless();
+            let has_flavors = !sc.flavors.is_empty();
+            let has_instances = sc.instances.is_some();
 
-            if sc.instances.min < 1 {
+            if has_flavors != has_instances {
                 return Err(format!(
-                    "WarpScript probe '{}': instances.min must be >= 1",
+                    "WarpScript probe '{}': 'flavors' and 'instances' must both be present or both absent",
                     probe.name
                 )
                 .into());
             }
-            if let Some(max) = sc.instances.max {
-                if max < sc.instances.min {
+
+            if !is_stateless {
+                let inst = sc.instances.as_ref().unwrap();
+                if inst.min < 1 {
                     return Err(format!(
-                        "WarpScript probe '{}': instances.max ({}) must be >= instances.min ({})",
-                        probe.name, max, sc.instances.min
+                        "WarpScript probe '{}': instances.min must be >= 1",
+                        probe.name
                     )
                     .into());
                 }
-            }
-            if sc.flavors.is_empty() {
-                return Err(format!(
-                    "WarpScript probe '{}': flavors must not be empty",
-                    probe.name
-                )
-                .into());
+                if let Some(max) = inst.max {
+                    if max < inst.min {
+                        return Err(format!(
+                            "WarpScript probe '{}': instances.max ({}) must be >= instances.min ({})",
+                            probe.name, max, inst.min
+                        )
+                        .into());
+                    }
+                }
             }
 
             // Threshold keys must be a subset of warpscript_files keys
@@ -702,6 +720,130 @@ mod tests {
         values.insert("cpu".to_string(), 20.0);
         values.insert("memory".to_string(), 20.0);
         assert!(!probe.should_scale_down(probe.min_level(), &values));
+    }
+
+    #[test]
+    fn test_stateless_valid_config() {
+        // No flavors and no instances → stateless mode is valid
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "alert up"
+            downscale_command = "alert down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_ok());
+        assert!(config.warpscript_probes[0].is_stateless());
+    }
+
+    #[test]
+    fn test_stateless_flavors_without_instances_error() {
+        // flavors present but instances absent → error
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            flavors = ["S", "M"]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_stateless_instances_without_flavors_error() {
+        // instances present but flavors absent → error
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            instances = {min = 1, max = 3}
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "scale up"
+            downscale_command = "scale down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_stateless_should_scale_up_every_cycle() {
+        // In stateless mode, should_scale_up fires unconditionally when threshold crossed
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "alert up"
+            downscale_command = "alert down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        let probe = &config.warpscript_probes[0];
+        assert!(probe.is_stateless());
+
+        let mut values = HashMap::new();
+        values.insert("cpu".to_string(), 80.0);
+        // Fires at any "level" since there are no level bounds
+        assert!(probe.should_scale_up(1, &values));
+        assert!(probe.should_scale_up(100, &values));
+        assert!(probe.should_scale_up(0, &values));
+
+        // Below threshold → no trigger
+        values.insert("cpu".to_string(), 60.0);
+        assert!(!probe.should_scale_up(1, &values));
+    }
+
+    #[test]
+    fn test_stateless_should_scale_down_every_cycle() {
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "alert up"
+            downscale_command = "alert down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        let probe = &config.warpscript_probes[0];
+
+        let mut values = HashMap::new();
+        values.insert("cpu".to_string(), 30.0);
+        // Fires at any "level"
+        assert!(probe.should_scale_down(1, &values));
+        assert!(probe.should_scale_down(0, &values));
+
+        // Above threshold → no trigger
+        values.insert("cpu".to_string(), 50.0);
+        assert!(!probe.should_scale_down(1, &values));
+    }
+
+    #[test]
+    fn test_stateless_compute_levels_empty() {
+        let toml = warpscript_probe_toml(
+            r#"
+            [warpscript_probes.scaling]
+            scale_up_threshold = {cpu = 70.0}
+            scale_down_threshold = {cpu = 40.0}
+            upscale_command = "alert up"
+            downscale_command = "alert down"
+            "#,
+        );
+        let mut config: Config = toml::from_str(&toml).unwrap();
+        config.validate().unwrap();
+        let probe = &config.warpscript_probes[0];
+        assert!(probe.compute_levels().is_empty());
+        assert_eq!(probe.max_level(), 0);
     }
 
     #[test]

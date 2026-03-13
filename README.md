@@ -1,6 +1,6 @@
 # cc-sonde — HTTP Monitoring & Auto-Scaling Application
 
-A Rust application that periodically checks HTTP endpoints and executes shell commands on failure, and optionally drives level-based auto-scaling from Warp 10 metrics.
+A Rust application that periodically checks HTTP endpoints and executes shell commands on failure, and optionally drives auto-scaling from Warp 10 metrics — either level-based (tracking flavor/instance state) or stateless (firing a command every cycle a threshold is crossed).
 
 ---
 
@@ -39,9 +39,11 @@ A Rust application that periodically checks HTTP endpoints and executes shell co
 - **Configurable Delays** — independent wait times after success, failure, command success, command failure
 - **Multiple Apps per Probe** — expand one probe definition into N independent instances via `apps`; `${APP_ID}` is substituted in commands and WarpScript files
 - **WarpScript Probes** — query a Warp 10 platform, compare the numeric result to configurable thresholds, and fire scale-up / scale-down shell commands
+  - **Two operating modes:**
+    - **Level-based** (`flavors` + `instances` present) — tracks a current level; upscale/downscale moves between computed (flavor, instances) pairs; `${FLAVOR}` and `${INSTANCES}` substituted in commands
+    - **Stateless** (`flavors` and `instances` both absent) — no level tracking; the command fires every cycle the threshold is crossed; useful for webhooks, alerts, `kubectl apply`, etc.
   - **Multi-metric support** — one probe can query several WarpScript files simultaneously; scale UP if ANY metric exceeds its threshold, scale DOWN if ALL metrics are below their thresholds
-  - **Computed levels** — levels are derived automatically from a `flavors` list and an `instances` range; no need to enumerate level entries manually
-  - **Flavor + instance scaling** — each level maps to a (flavor, instances) pair; `${FLAVOR}` and `${INSTANCES}` are substituted in commands
+  - **Computed levels** (level-based only) — levels are derived automatically from a `flavors` list and an `instances` range; no need to enumerate level entries manually
   - WarpScript files read once at startup then cached; retry loop if a file is not yet available at launch
   - `${WARP_TOKEN}` and `${APP_ID}` substitution inside WarpScript files
   - Per-app optional `warp_token`; falls back to the `WARP_TOKEN` environment variable
@@ -244,7 +246,7 @@ interval_seconds = 60
 expected_status = 200
 ```
 
-A minimal valid config with only a WarpScript probe:
+A minimal valid config with only a WarpScript probe (level-based):
 
 ```toml
 [[warpscript_probes]]
@@ -259,6 +261,21 @@ scale_up_threshold   = {cpu = 70.0}
 scale_down_threshold = {cpu = 40.0}
 upscale_command   = "kubectl scale deployment myapp --replicas=${INSTANCES}"
 downscale_command = "kubectl scale deployment myapp --replicas=${INSTANCES}"
+```
+
+A minimal valid config with a stateless WarpScript probe (no level tracking):
+
+```toml
+[[warpscript_probes]]
+name = "CPU Alert"
+warpscript_file = {cpu = "warpscript/cpu.mc2"}
+interval_seconds = 60
+
+[warpscript_probes.scaling]
+scale_up_threshold   = {cpu = 70.0}
+scale_down_threshold = {cpu = 40.0}
+upscale_command   = "curl -s https://ops.example.com/alert?event=cpu_high"
+downscale_command = "curl -s https://ops.example.com/alert?event=cpu_normal"
 ```
 
 See `config.example.toml` for annotated healthcheck examples.
@@ -443,7 +460,16 @@ upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances
 downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
 ```
 
-#### Level Computation
+#### Operating Modes
+
+| Mode | `flavors` | `instances` | Behaviour |
+|------|-----------|-------------|-----------|
+| **Level-based** | present | present | Tracks a current level; each (flavor, instances) pair is a level; commands receive `${FLAVOR}` and `${INSTANCES}` |
+| **Stateless** | absent | absent | No level tracking; the command fires every cycle the threshold is crossed; `${FLAVOR}` and `${INSTANCES}` are not substituted |
+
+Having one of `flavors`/`instances` without the other is a configuration error.
+
+#### Level Computation (level-based mode only)
 
 Levels are derived automatically from `flavors` and `instances`. There is no explicit `levels` array to maintain.
 
@@ -481,13 +507,15 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `instances.min` | yes | Minimum instance count. Must be ≥ 1. |
+| `instances.min` | level-based only | Minimum instance count. Must be ≥ 1. |
 | `instances.max` | no | Maximum instance count for the last flavor. If absent, defaults to `min` (no instance scaling, only flavor scaling). Must be ≥ `min`. |
-| `flavors` | yes | Ordered list of flavor names (e.g. `["S", "M", "L"]`). Must not be empty. |
+| `flavors` | level-based only | Ordered list of flavor names (e.g. `["S", "M", "L"]`). Must not be empty in level-based mode. |
 | `scale_up_threshold` | no | Inline TOML table `{metric = value, …}`. Scale UP if ANY metric value exceeds its threshold. Keys must be present in `warpscript_file`. |
 | `scale_down_threshold` | no | Inline TOML table `{metric = value, …}`. Scale DOWN if ALL metric values are below their thresholds. Keys must be present in `warpscript_file`. |
 | `upscale_command` | yes | Shell command executed when scaling up. Must not be empty. |
 | `downscale_command` | yes | Shell command executed when scaling down. Must not be empty. |
+
+`flavors` and `instances` must **both** be present (level-based) or **both** be absent (stateless). Specifying one without the other is rejected at startup.
 
 #### App Parameters (WarpScript)
 
@@ -505,13 +533,13 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 4. `${WARP_TOKEN}` and `${APP_ID}` are substituted into each cached script, and it is sent via HTTP POST to `WARP_ENDPOINT`.
 5. The last element of the JSON response array is used as the metric value (must be a number).
 6. The values are compared against the thresholds:
-   - ANY `value > scale_up_threshold[metric]` → execute `upscale_command`, increment level (if the command succeeds)
-   - ALL `value < scale_down_threshold[metric]` (and the threshold map is non-empty) → execute `downscale_command`, decrement level (if the command succeeds)
+   - **Level-based:** ANY `value > scale_up_threshold[metric]` → execute `upscale_command`, increment level (if the command succeeds); ALL `value < scale_down_threshold[metric]` → execute `downscale_command`, decrement level (if the command succeeds)
+   - **Stateless:** same threshold conditions, but the command fires every matching cycle and no level is tracked or updated
    - Otherwise → no action, wait `interval_seconds`
-7. Boundaries: upscale is ignored at max level; downscale is ignored at min level (level 1).
+7. Boundaries (level-based only): upscale is ignored at max level; downscale is ignored at min level (level 1). In stateless mode there are no level bounds.
 8. After any scaling action, wait `delay_after_scale_seconds` before the next check.
 9. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed.
-10. The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., `flavors` was shortened), it is clamped to level 1 and a `WARN` is logged.
+10. (Level-based only) The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., `flavors` was shortened), it is clamped to level 1 and a `WARN` is logged.
 
 #### Token Resolution
 
@@ -525,11 +553,13 @@ For each polling cycle:
 
 The following placeholders are substituted in `upscale_command` and `downscale_command`:
 
-| Placeholder | Replaced with |
-|-------------|---------------|
-| `${APP_ID}` | The app identifier (only when `apps` is configured) |
-| `${FLAVOR}` | The flavor name at the **current** level (upscale) or **target** level (downscale) |
-| `${INSTANCES}` | The instance count at the **current** level (upscale) or **target** level (downscale) |
+| Placeholder | Level-based | Stateless | Replaced with |
+|-------------|-------------|-----------|---------------|
+| `${APP_ID}` | ✓ | ✓ | The app identifier (only when `apps` is configured) |
+| `${FLAVOR}` | ✓ | — | The flavor name at the **current** level (upscale) or **target** level (downscale) |
+| `${INSTANCES}` | ✓ | — | The instance count at the **current** level (upscale) or **target** level (downscale) |
+
+In stateless mode, `${FLAVOR}` and `${INSTANCES}` are not substituted (no level is computed). Do not include them in stateless commands.
 
 For `on_failure_command`, only `${APP_ID}` is substituted.
 
@@ -604,6 +634,7 @@ Each script must leave exactly one numeric value on the stack; the last element 
 - **Script changes**: WarpScript files are read once at startup. Restart the application to pick up edits.
 - **Instance-only scaling** (single flavor): set `flavors = ["M"]` with `instances = {min = 1, max = 4}` to scale only instance count.
 - **Flavor-only scaling** (fixed instances): set `instances = {min = 2}` (no `max`) with multiple flavors.
+- **Stateless mode** (webhooks, alerts, `kubectl apply`): omit both `flavors` and `instances`; the command fires every cycle the threshold is crossed. Use `delay_after_scale_seconds` as a cooldown to avoid flooding the target.
 
 ---
 
@@ -828,7 +859,7 @@ Observe that:
 | `Probe '…': app id '…' contains invalid characters` | `id` contains characters other than alphanumeric, `-`, `_`, `.` |
 | `WarpScript probe '…': warpscript_file must define at least one metric` | `warpscript_file` is an empty table `{}` |
 | `WarpScript probe '…': scale_up_threshold key '…' not found in warpscript_file` | A threshold key references a metric not present in `warpscript_file` |
-| `WarpScript probe '…': flavors must not be empty` | `flavors = []` or the key is absent |
+| `WarpScript probe '…': 'flavors' and 'instances' must both be present or both absent` | One of the two is set without the other; either set both (level-based) or omit both (stateless) |
 | `WarpScript probe '…': instances.min must be >= 1` | `instances.min = 0` is not allowed |
 | `WarpScript probe '…': instances.max (N) must be >= instances.min (M)` | `max` is set to a value smaller than `min` |
 | `WarpScript probe '…': upscale_command cannot be empty` | `upscale_command = ""` is not allowed; use `"true"` for a deliberate no-op |
@@ -838,8 +869,8 @@ Observe that:
 | `No Warp token available …` | App has no `warp_token` and `WARP_TOKEN` env var is not set; that cycle is skipped |
 | `Failed to read WarpScript file, will retry` | File not found or permission error; the probe retries every `interval_seconds` |
 | WarpScript changes not reflected | The script is read once at startup; restart the application after editing the `.mc2` file |
-| Scaling level reset to minimum after restart | The previously persisted level is not in the current config; expected behaviour after reducing `flavors` or `instances.max` |
-| `${FLAVOR}` / `${INSTANCES}` not substituted in command | Verify the placeholders are spelled exactly as shown; only `upscale_command` and `downscale_command` receive these substitutions |
+| Scaling level reset to minimum after restart | (Level-based only) The previously persisted level is not in the current config; expected behaviour after reducing `flavors` or `instances.max` |
+| `${FLAVOR}` / `${INSTANCES}` not substituted in command | In level-based mode, verify the placeholders are spelled exactly as shown. In stateless mode these placeholders are intentionally not substituted — use only `${APP_ID}` |
 | Two instances diverge on `current_level` | Expected without Redis; with Redis and `--multi-instance`, state is synced after each lock acquisition — check logs for `State refreshed from Redis` |
 | Command times out but child processes keep running | Should not happen on Linux/macOS — the whole process group is killed. On other platforms, only `sh` is killed. |
 | `Redis URL provided but redis-persistence feature is not enabled` | Rebuild with `cargo build --features redis-persistence` |
