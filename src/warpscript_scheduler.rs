@@ -464,7 +464,7 @@ pub async fn schedule_warpscript_probe(
                     to_level = new_level,
                     "Scaling UP detected"
                 );
-                let computed = probe.get_computed_level(current_level).unwrap();
+                let computed = probe.get_computed_level(new_level).unwrap();
                 if dry_run {
                     warn!(
                         probe_name = %probe.name,
