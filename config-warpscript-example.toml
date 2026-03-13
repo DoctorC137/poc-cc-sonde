@@ -43,7 +43,6 @@ name = "CPU Auto-Scaler"
 warpscript_file = {cpu = "warpscript/cpu_usage.mc2"}
 interval_seconds = 60
 command_timeout_seconds = 45
-delay_after_scale_seconds = 120   # Wait 2 min after scaling before re-evaluating
 
 [[warpscript_probes.apps]]
 id = "app_frontend"
@@ -56,6 +55,7 @@ id = "app_backend"
 [warpscript_probes.scaling]
 instances = {min = 1, max = 3}
 flavors   = ["S", "M", "L"]   # 5 computed levels: (S,1),(M,1),(L,1),(L,2),(L,3)
+delay_after_scale_seconds = 120   # Wait 2 min after scaling before re-evaluating
 
 # Scale UP if cpu > 70%
 scale_up_threshold = {cpu = 70.0}
@@ -74,7 +74,6 @@ downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances
 name = "Multi-Metric Scaler"
 warpscript_file = {cpu = "warpscript/cpu.mc2", memory = "warpscript/mem.mc2"}
 interval_seconds = 60
-delay_after_scale_seconds = 180   # Wait 3 min after scaling
 
 [[warpscript_probes.apps]]
 id = "app_frontend"
@@ -87,6 +86,7 @@ warp_token = "TOKEN_BACKEND"
 [warpscript_probes.scaling]
 instances = {min = 1, max = 2}
 flavors   = ["S", "M", "L"]   # 4 levels: (S,1),(M,1),(L,1),(L,2)
+delay_after_scale_seconds = 180   # Wait 3 min after scaling
 
 # Scale UP if cpu > 70% OR memory > 80%  (ANY logic)
 scale_up_threshold = {cpu = 70.0, memory = 80.0}
@@ -104,11 +104,11 @@ downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances
 name = "Request Rate Scaler"
 warpscript_file = {rps = "warpscript/request_rate.mc2"}
 interval_seconds = 30
-delay_after_scale_seconds = 60
 
 [warpscript_probes.scaling]
 instances = {min = 1, max = 4}   # 4 levels, all flavor "M"
 flavors   = ["M"]
+delay_after_scale_seconds = 60
 
 scale_up_threshold   = {rps = 100.0}   # > 100 req/s → scale up
 scale_down_threshold = {rps = 60.0}    # < 60 req/s  → scale down
@@ -123,11 +123,11 @@ downscale_command = "kubectl scale deployment api --replicas=${INSTANCES}"
 name = "Flavor-Only Scaler"
 warpscript_file = {cpu = "warpscript/cpu.mc2"}
 interval_seconds = 60
-delay_after_scale_seconds = 90
 
 [warpscript_probes.scaling]
 instances = {min = 2}   # No max → effective_max = min = 2, no instance scaling
 flavors   = ["XS", "S", "M", "L"]   # 4 levels, always 2 instances
+delay_after_scale_seconds = 90
 
 scale_up_threshold   = {cpu = 65.0}
 scale_down_threshold = {cpu = 35.0}
@@ -155,10 +155,10 @@ failure_retries_before_command = 2
 on_failure_command = "curl -s https://ops.example.com/alert?probe=${APP_ID}"
 
 # Delay before the next cycle when on_failure_command exits 0. Default: interval_seconds.
-delay_after_onf_command_success_seconds = 300
+delay_after_command_success_seconds = 300
 
 # Delay before the next cycle when on_failure_command exits non-zero. Default: interval_seconds.
-delay_after_onf_command_failure_seconds = 60
+delay_after_command_failure_seconds = 60
 
 [[warpscript_probes.apps]]
 id = "app_frontend"

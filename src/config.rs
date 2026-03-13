@@ -104,16 +104,14 @@ pub struct WarpScriptProbe {
     pub command_timeout_seconds: u64,
     /// HTTP request timeout in seconds for WarpScript calls (defaults to 30)
     pub request_timeout_seconds: Option<u64>,
-    /// Delay after scaling up or down
-    pub delay_after_scale_seconds: Option<u64>,
     /// Shell command to execute after repeated probe failures
     pub on_failure_command: Option<String>,
     /// Consecutive failures required before executing on_failure_command (default 0 = first failure)
     pub failure_retries_before_command: Option<u32>,
     /// Delay in seconds before next execution after on_failure_command succeeds (defaults to interval_seconds)
-    pub delay_after_onf_command_success_seconds: Option<u64>,
+    pub delay_after_command_success_seconds: Option<u64>,
     /// Delay in seconds before next execution after on_failure_command fails (defaults to interval_seconds)
-    pub delay_after_onf_command_failure_seconds: Option<u64>,
+    pub delay_after_command_failure_seconds: Option<u64>,
     /// Applications to manage (each with optional warp_token)
     #[serde(default)]
     pub apps: Vec<WarpScriptApp>,
@@ -155,6 +153,8 @@ pub struct ScalingConfig {
     pub scale_down_threshold: HashMap<String, f64>,
     pub upscale_command: String,
     pub downscale_command: String,
+    /// Delay after scaling up or down
+    pub delay_after_scale_seconds: Option<u64>,
 }
 
 /// A computed scaling level (not deserialised, generated at runtime from ScalingConfig).
@@ -171,7 +171,8 @@ impl WarpScriptProbe {
     }
 
     pub fn get_delay_after_scale(&self) -> u64 {
-        self.delay_after_scale_seconds
+        self.scaling
+            .delay_after_scale_seconds
             .unwrap_or(self.interval_seconds)
     }
 
@@ -180,12 +181,12 @@ impl WarpScriptProbe {
     }
 
     pub fn get_delay_after_onf_command_success(&self) -> u64 {
-        self.delay_after_onf_command_success_seconds
+        self.delay_after_command_success_seconds
             .unwrap_or(self.interval_seconds)
     }
 
     pub fn get_delay_after_onf_command_failure(&self) -> u64 {
-        self.delay_after_onf_command_failure_seconds
+        self.delay_after_command_failure_seconds
             .unwrap_or(self.interval_seconds)
     }
 

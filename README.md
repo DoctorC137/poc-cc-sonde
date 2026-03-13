@@ -161,7 +161,7 @@ WARN probe_name="cpu-scaler" command="clever scale --app app1 --flavor M --insta
 
 ### Behaviour details
 
-- When a failure command is skipped, the scheduler treats it as if the command had **succeeded**: the next delay will be `delay_after_command_success_seconds` (healthcheck) or `delay_after_onf_command_success_seconds` (WarpScript). This simulates the nominal recovery path.
+- When a failure command is skipped, the scheduler treats it as if the command had **succeeded**: the next delay will be `delay_after_command_success_seconds` (healthcheck or WarpScript). This simulates the nominal recovery path.
 - When a scaling command is skipped, `current_level` is still updated. The probe tracks the level it *would* be at, so threshold logic remains coherent across cycles.
 - Removing `--dry-run` resumes normal operation with no further changes required.
 
@@ -425,13 +425,12 @@ warpscript_file = {cpu = "warpscript/cpu.mc2"}
 interval_seconds = 60
 command_timeout_seconds = 45
 request_timeout_seconds = 30
-delay_after_scale_seconds = 120
 
 # Optional failure handling
 on_failure_command = "curl -s https://ops.example.com/alert?probe=${APP_ID}"
 failure_retries_before_command = 2
-delay_after_onf_command_success_seconds = 300
-delay_after_onf_command_failure_seconds = 60
+delay_after_command_success_seconds = 300
+delay_after_command_failure_seconds = 60
 
 [[warpscript_probes.apps]]
 id = "app_frontend"
@@ -444,6 +443,7 @@ id = "app_backend"
 [warpscript_probes.scaling]
 # Instance range for the last flavor
 instances = {min = 1, max = 3}
+delay_after_scale_seconds = 120
 
 # Ordered list of flavors (smallest to largest)
 flavors = ["S", "M", "L"]
@@ -496,11 +496,10 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 | `interval_seconds` | yes | — | Default interval between executions. Must be > 0. |
 | `request_timeout_seconds` | no | `30` | HTTP request timeout for WarpScript API calls (seconds) |
 | `command_timeout_seconds` | no | `30` | Maximum execution time for scaling and failure commands (seconds) |
-| `delay_after_scale_seconds` | no | `interval_seconds` | Wait time after any scaling action (up or down) |
 | `on_failure_command` | no | — | Shell command to execute when the failure threshold is reached. `${APP_ID}` is substituted if `apps` is configured. |
 | `failure_retries_before_command` | no | `0` | Consecutive WarpScript failures tolerated before executing `on_failure_command` |
-| `delay_after_onf_command_success_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits 0 |
-| `delay_after_onf_command_failure_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits non-zero or fails to spawn |
+| `delay_after_command_success_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits 0 |
+| `delay_after_command_failure_seconds` | no | `interval_seconds` | Wait time after `on_failure_command` exits non-zero or fails to spawn |
 | `apps` | no | `[]` | List of apps to manage; each creates an independent probe instance |
 
 #### Scaling Parameters (`[warpscript_probes.scaling]`)
@@ -514,6 +513,7 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 | `scale_down_threshold` | no | Inline TOML table `{metric = value, …}`. Scale DOWN if ALL metric values are below their thresholds. Keys must be present in `warpscript_file`. |
 | `upscale_command` | yes | Shell command executed when scaling up. Must not be empty. |
 | `downscale_command` | yes | Shell command executed when scaling down. Must not be empty. |
+| `delay_after_scale_seconds` | no | Wait time (seconds) after any scaling action (up or down). Defaults to `interval_seconds`. |
 
 `flavors` and `instances` must **both** be present (level-based) or **both** be absent (stateless). Specifying one without the other is rejected at startup.
 
