@@ -447,7 +447,12 @@ id = "app_backend"
 [warpscript_probes.scaling]
 # Instance range for the last flavor
 instances = {min = 1, max = 3}
-delay_after_scale_seconds = 120
+
+# Directional cooldown matrix (optional, falls back to interval_seconds)
+# After an upscale: block another upscale for 120 s, block downscale for 30 s
+delay_after_upscale   = {upscale = 120, downscale = 30}
+# After a downscale: block another downscale for 120 s, block upscale for 30 s
+delay_after_downscale = {downscale = 120, upscale = 30}
 
 # Ordered list of flavors (smallest to largest)
 flavors = ["S", "M", "L"]
@@ -517,9 +522,9 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
 | `scale_down_threshold` | no | Inline TOML table `{metric = value, …}`. Scale DOWN if ALL metric values are below their thresholds. Keys must be present in `warpscript_file`. |
 | `upscale_command` | yes | Shell command executed when scaling up. Must not be empty. |
 | `downscale_command` | yes | Shell command executed when scaling down. Must not be empty. |
-| `delay_after_scale_seconds` | no | Wait time (seconds) after upscale or downscale. Fallback if the specific fields below are absent. Defaults to `interval_seconds`. |
-| `delay_after_upscale_seconds` | no | Wait time (seconds) after a successful upscale. Overrides `delay_after_scale_seconds`. |
-| `delay_after_downscale_seconds` | no | Wait time (seconds) after a successful downscale. Overrides `delay_after_scale_seconds`. |
+| `delay_after_scale_seconds` | no | Fallback wait time (seconds) used when a directional matrix field is absent. Defaults to `interval_seconds`. |
+| `delay_after_upscale` | no | Inline TOML table `{upscale = N, downscale = N}` — per-direction cooldowns after a successful upscale. Each field is optional; absent fields fall back to `delay_after_scale_seconds` then `interval_seconds`. |
+| `delay_after_downscale` | no | Inline TOML table `{downscale = N, upscale = N}` — per-direction cooldowns after a successful downscale. Each field is optional; absent fields fall back to `delay_after_scale_seconds` then `interval_seconds`. |
 
 `flavors` and `instances` must **both** be present (level-based) or **both** be absent (stateless). Specifying one without the other is rejected at startup.
 
@@ -543,7 +548,7 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
    - **Stateless:** same threshold conditions, but the command fires every matching cycle and no level is tracked or updated
    - Otherwise → no action, wait `interval_seconds`
 7. Boundaries (level-based only): upscale is ignored at max level; downscale is ignored at min level (level 1). In stateless mode there are no level bounds.
-8. After any scaling action, wait `delay_after_scale_seconds` before the next check.
+8. After a scaling action the **directional cooldown matrix** takes effect: `delay_after_upscale` / `delay_after_downscale` each carry an `upscale` and a `downscale` field, independently blocking the two directions. The probe waits for the minimum of the two active timers; if only one direction is blocked the other can still proceed at the next cycle. Both timers fall back to `delay_after_scale_seconds`, then to `interval_seconds`, for any absent field.
 9. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed.
 10. (Level-based only) The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., `flavors` was shortened), it is clamped to level 1 and a `WARN` is logged.
 
@@ -635,12 +640,12 @@ Each script must leave exactly one numeric value on the stack; the last element 
 #### Scaling Strategy Tips
 
 - **Hysteresis**: keep `scale_down_threshold` meaningfully below `scale_up_threshold` to avoid flapping (e.g., up at 70%, down at 40%).
-- **Cooldown**: use `delay_after_scale_seconds` to let the system stabilize before re-evaluating.
+- **Cooldown**: use the directional matrix (`delay_after_upscale` / `delay_after_downscale`) to let the system stabilize before re-evaluating. Example: after an upscale, allow a fast downscale (30 s) but prevent another upscale for longer (120 s).
 - **Multi-metric AND logic for downscale**: requiring all metrics to be low before downscaling is conservative and avoids premature scale-down when only one dimension recovers.
 - **Script changes**: WarpScript files are read once at startup. Restart the application to pick up edits.
 - **Instance-only scaling** (single flavor): set `flavors = ["M"]` with `instances = {min = 1, max = 4}` to scale only instance count.
 - **Flavor-only scaling** (fixed instances): set `instances = {min = 2}` (no `max`) with multiple flavors.
-- **Stateless mode** (webhooks, alerts, `kubectl apply`): omit both `flavors` and `instances`; the command fires every cycle the threshold is crossed. Use `delay_after_scale_seconds` as a cooldown to avoid flooding the target.
+- **Stateless mode** (webhooks, alerts, `kubectl apply`): omit both `flavors` and `instances`; the command fires every cycle the threshold is crossed. Use `delay_after_upscale` / `delay_after_downscale` (or the `delay_after_scale_seconds` fallback) as a cooldown to avoid flooding the target.
 
 ---
 

@@ -28,6 +28,10 @@ pub struct WarpScriptProbeState {
     pub next_check_timestamp: u64,
     #[serde(default)]
     pub consecutive_failures: u32,
+    #[serde(default)]
+    pub upscale_blocked_until: u64,
+    #[serde(default)]
+    pub downscale_blocked_until: u64,
 }
 
 #[async_trait::async_trait]

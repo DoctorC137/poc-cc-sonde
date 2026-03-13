@@ -158,6 +158,15 @@ pub async fn schedule_warpscript_probe(
         .map(|s| s.last_values.clone())
         .unwrap_or_default();
 
+    let mut upscale_blocked_until: u64 = previous_state
+        .as_ref()
+        .map(|s| s.upscale_blocked_until)
+        .unwrap_or(0);
+    let mut downscale_blocked_until: u64 = previous_state
+        .as_ref()
+        .map(|s| s.downscale_blocked_until)
+        .unwrap_or(0);
+
     // Resolve environment variables once before the loop (stable for process lifetime)
     let endpoint = match env::var("WARP_ENDPOINT") {
         Ok(v) => v,
@@ -234,10 +243,11 @@ pub async fn schedule_warpscript_probe(
         // Safe to do here because we hold the lock — no other instance can mutate the
         // state between this load and our eventual save.
         //
-        // cooldown_remaining is extracted here so that release_lock (an async call) stays
-        // outside the if-let block — keeping Box<dyn Error> from the load result out of
-        // scope across any await point, which is required for the future to be Send.
-        let cooldown_remaining;
+        // The blocked_until values are extracted before the if-let block so that
+        // release_lock (an async call) stays outside the if-let scope — keeping
+        // Box<dyn Error> from the load result out of scope across any await point,
+        // which is required for the future to be Send.
+        let (new_upscale_blocked, new_downscale_blocked);
         if let Ok(Some(fresh_state)) = backend.load_warpscript_state(&probe.name).await {
             if fresh_state.current_level != current_level {
                 info!(
@@ -264,27 +274,33 @@ pub async fn schedule_warpscript_probe(
             };
             consecutive_failures = fresh_state.consecutive_failures;
             last_values = fresh_state.last_values.clone();
-            let now = persistence::current_timestamp();
-            cooldown_remaining = fresh_state.next_check_timestamp.saturating_sub(now);
+            new_upscale_blocked = fresh_state.upscale_blocked_until;
+            new_downscale_blocked = fresh_state.downscale_blocked_until;
         } else {
-            cooldown_remaining = 0;
+            new_upscale_blocked = upscale_blocked_until;
+            new_downscale_blocked = downscale_blocked_until;
         }
+        upscale_blocked_until = new_upscale_blocked;
+        downscale_blocked_until = new_downscale_blocked;
 
-        // Respect the post-scale cooldown set by whichever instance last acted.
-        // Without this check, an instance that wins the lock immediately after
-        // another instance scaled would execute a new probe cycle during the cooldown.
-        if cooldown_remaining > 0 {
+        // Respect the per-direction cooldowns set by whichever instance last acted.
+        // Only skip the cycle when BOTH directions are still blocked; if only one
+        // direction is blocked the probe will proceed and apply per-direction checks
+        // in the scaling branches below.
+        let now = persistence::current_timestamp();
+        if now < upscale_blocked_until && now < downscale_blocked_until {
             debug!(
                 probe_name = %probe.name,
-                remaining_seconds = cooldown_remaining,
-                "Post-scale cooldown still active, releasing lock and waiting"
+                upscale_remaining = upscale_blocked_until - now,
+                downscale_remaining = downscale_blocked_until - now,
+                "Both scaling directions still in cooldown, releasing lock and waiting"
             );
             if let Some(ref token) = lock_token {
                 if let Err(e) = backend.release_lock(&lock_key, token).await {
                     debug!(probe_name = %probe.name, error = %e, "Failed to release lock (will expire via TTL)");
                 }
             }
-            next_delay = cooldown_remaining;
+            next_delay = upscale_blocked_until.min(downscale_blocked_until).saturating_sub(now);
             continue;
         }
 
@@ -419,6 +435,8 @@ pub async fn schedule_warpscript_probe(
                 last_values: last_values.clone(),
                 next_check_timestamp: check_timestamp + next_delay,
                 consecutive_failures,
+                upscale_blocked_until,
+                downscale_blocked_until,
             };
             if let Err(e) = backend.save_warpscript_state(&state).await {
                 error!(probe_name = %probe.name, error = %e, "Failed to save WarpScript state");
@@ -437,138 +455,162 @@ pub async fn schedule_warpscript_probe(
 
         // Determine scaling action
         if probe.should_scale_up(current_level, &metric_values) {
-            let cmd = &probe.scaling.upscale_command;
-
-            let command_ok = if probe.is_stateless() {
-                warn!(probe_name = %probe.name, "Scaling UP detected (stateless)");
-                if dry_run {
-                    warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping upscale command");
-                    true
-                } else {
-                    execute_scaling_command(
-                        &probe.name,
-                        cmd,
-                        app_id,
-                        "",
-                        0,
-                        probe.command_timeout_seconds,
-                        "upscale",
-                    )
-                    .await
-                }
-            } else {
-                let new_level = current_level + 1;
-                warn!(
+            let now = check_timestamp;
+            if now < upscale_blocked_until {
+                debug!(
                     probe_name = %probe.name,
-                    from_level = current_level,
-                    to_level = new_level,
-                    "Scaling UP detected"
-                );
-                let computed = probe.get_computed_level(new_level).unwrap();
-                if dry_run {
-                    warn!(
-                        probe_name = %probe.name,
-                        command = %cmd,
-                        flavor = %computed.flavor,
-                        instances = computed.instances,
-                        from_level = current_level,
-                        to_level = new_level,
-                        "DRY RUN: skipping upscale command"
-                    );
-                    true
-                } else {
-                    execute_scaling_command(
-                        &probe.name,
-                        cmd,
-                        app_id,
-                        &computed.flavor,
-                        computed.instances,
-                        probe.command_timeout_seconds,
-                        "upscale",
-                    )
-                    .await
-                }
-            };
-
-            if command_ok {
-                if !probe.is_stateless() {
-                    current_level += 1;
-                }
-                next_delay = probe.get_delay_after_upscale();
-            } else {
-                warn!(
-                    probe_name = %probe.name,
-                    current_level,
-                    "Scaling command failed — level not updated, will retry at next interval"
+                    remaining_seconds = upscale_blocked_until - now,
+                    "Upscale cooldown active, skipping upscale"
                 );
                 next_delay = probe.interval_seconds;
+            } else {
+                let cmd = &probe.scaling.upscale_command;
+
+                let command_ok = if probe.is_stateless() {
+                    warn!(probe_name = %probe.name, "Scaling UP detected (stateless)");
+                    if dry_run {
+                        warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping upscale command");
+                        true
+                    } else {
+                        execute_scaling_command(
+                            &probe.name,
+                            cmd,
+                            app_id,
+                            "",
+                            0,
+                            probe.command_timeout_seconds,
+                            "upscale",
+                        )
+                        .await
+                    }
+                } else {
+                    let new_level = current_level + 1;
+                    warn!(
+                        probe_name = %probe.name,
+                        from_level = current_level,
+                        to_level = new_level,
+                        "Scaling UP detected"
+                    );
+                    let computed = probe.get_computed_level(new_level).unwrap();
+                    if dry_run {
+                        warn!(
+                            probe_name = %probe.name,
+                            command = %cmd,
+                            flavor = %computed.flavor,
+                            instances = computed.instances,
+                            from_level = current_level,
+                            to_level = new_level,
+                            "DRY RUN: skipping upscale command"
+                        );
+                        true
+                    } else {
+                        execute_scaling_command(
+                            &probe.name,
+                            cmd,
+                            app_id,
+                            &computed.flavor,
+                            computed.instances,
+                            probe.command_timeout_seconds,
+                            "upscale",
+                        )
+                        .await
+                    }
+                };
+
+                if command_ok {
+                    if !probe.is_stateless() {
+                        current_level += 1;
+                    }
+                    upscale_blocked_until   = now + probe.delay_after_upscale_then_upscale();
+                    downscale_blocked_until = now + probe.delay_after_upscale_then_downscale();
+                    next_delay = upscale_blocked_until.min(downscale_blocked_until).saturating_sub(now);
+                } else {
+                    warn!(
+                        probe_name = %probe.name,
+                        current_level,
+                        "Scaling command failed — level not updated, will retry at next interval"
+                    );
+                    next_delay = probe.interval_seconds;
+                }
             }
         } else if probe.should_scale_down(current_level, &metric_values) {
-            let cmd = &probe.scaling.downscale_command;
-
-            let command_ok = if probe.is_stateless() {
-                warn!(probe_name = %probe.name, "Scaling DOWN detected (stateless)");
-                if dry_run {
-                    warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping downscale command");
-                    true
-                } else {
-                    execute_scaling_command(
-                        &probe.name,
-                        cmd,
-                        app_id,
-                        "",
-                        0,
-                        probe.command_timeout_seconds,
-                        "downscale",
-                    )
-                    .await
-                }
-            } else {
-                let new_level = current_level - 1;
-                warn!(
+            let now = check_timestamp;
+            if now < downscale_blocked_until {
+                debug!(
                     probe_name = %probe.name,
-                    from_level = current_level,
-                    to_level = new_level,
-                    "Scaling DOWN detected"
-                );
-                let computed = probe.get_computed_level(new_level).unwrap();
-                if dry_run {
-                    warn!(
-                        probe_name = %probe.name,
-                        command = %cmd,
-                        flavor = %computed.flavor,
-                        instances = computed.instances,
-                        from_level = current_level,
-                        to_level = new_level,
-                        "DRY RUN: skipping downscale command"
-                    );
-                    true
-                } else {
-                    execute_scaling_command(
-                        &probe.name,
-                        cmd,
-                        app_id,
-                        &computed.flavor,
-                        computed.instances,
-                        probe.command_timeout_seconds,
-                        "downscale",
-                    )
-                    .await
-                }
-            };
-
-            if command_ok {
-                if !probe.is_stateless() {
-                    current_level -= 1;
-                }
-                next_delay = probe.get_delay_after_downscale();
-            } else {
-                warn!(
-                    probe_name = %probe.name,
-                    current_level,
-                    "Scaling command failed — level not updated, will retry at next interval"
+                    remaining_seconds = downscale_blocked_until - now,
+                    "Downscale cooldown active, skipping downscale"
                 );
                 next_delay = probe.interval_seconds;
+            } else {
+                let cmd = &probe.scaling.downscale_command;
+
+                let command_ok = if probe.is_stateless() {
+                    warn!(probe_name = %probe.name, "Scaling DOWN detected (stateless)");
+                    if dry_run {
+                        warn!(probe_name = %probe.name, command = %cmd, "DRY RUN: skipping downscale command");
+                        true
+                    } else {
+                        execute_scaling_command(
+                            &probe.name,
+                            cmd,
+                            app_id,
+                            "",
+                            0,
+                            probe.command_timeout_seconds,
+                            "downscale",
+                        )
+                        .await
+                    }
+                } else {
+                    let new_level = current_level - 1;
+                    warn!(
+                        probe_name = %probe.name,
+                        from_level = current_level,
+                        to_level = new_level,
+                        "Scaling DOWN detected"
+                    );
+                    let computed = probe.get_computed_level(new_level).unwrap();
+                    if dry_run {
+                        warn!(
+                            probe_name = %probe.name,
+                            command = %cmd,
+                            flavor = %computed.flavor,
+                            instances = computed.instances,
+                            from_level = current_level,
+                            to_level = new_level,
+                            "DRY RUN: skipping downscale command"
+                        );
+                        true
+                    } else {
+                        execute_scaling_command(
+                            &probe.name,
+                            cmd,
+                            app_id,
+                            &computed.flavor,
+                            computed.instances,
+                            probe.command_timeout_seconds,
+                            "downscale",
+                        )
+                        .await
+                    }
+                };
+
+                if command_ok {
+                    if !probe.is_stateless() {
+                        current_level -= 1;
+                    }
+                    downscale_blocked_until = now + probe.delay_after_downscale_then_downscale();
+                    upscale_blocked_until   = now + probe.delay_after_downscale_then_upscale();
+                    next_delay = upscale_blocked_until.min(downscale_blocked_until).saturating_sub(now);
+                } else {
+                    warn!(
+                        probe_name = %probe.name,
+                        current_level,
+                        "Scaling command failed — level not updated, will retry at next interval"
+                    );
+                    next_delay = probe.interval_seconds;
+                }
             }
         } else {
             debug!(
@@ -587,6 +629,8 @@ pub async fn schedule_warpscript_probe(
             last_values: last_values.clone(),
             next_check_timestamp: check_timestamp + next_delay,
             consecutive_failures,
+            upscale_blocked_until,
+            downscale_blocked_until,
         };
 
         if let Err(e) = backend.save_warpscript_state(&state).await {
