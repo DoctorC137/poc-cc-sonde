@@ -767,8 +767,8 @@ mod tests {
             flavors = ["S", "M", "L"]
             scale_up_threshold = {memory = 60.0, cpu = 60.0}
             scale_down_threshold = {memory = 40.0, cpu = 40.0}
-            upscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
-            downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+            upscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
+            downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
         "#;
         let mut config: Config = toml::from_str(toml_content).unwrap();
         assert!(config.validate().is_ok());

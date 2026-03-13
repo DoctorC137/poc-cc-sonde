@@ -41,7 +41,7 @@ A Rust application that periodically checks HTTP endpoints and executes shell co
 - **WarpScript Probes** — query a Warp 10 platform, compare the numeric result to configurable thresholds, and fire scale-up / scale-down shell commands
   - **Multi-metric support** — one probe can query several WarpScript files simultaneously; scale UP if ANY metric exceeds its threshold, scale DOWN if ALL metrics are below their thresholds
   - **Computed levels** — levels are derived automatically from a `flavors` list and an `instances` range; no need to enumerate level entries manually
-  - **Flavor + instance scaling** — each level maps to a (flavor, instances) pair; `${flavor}` and `${instances}` are substituted in commands
+  - **Flavor + instance scaling** — each level maps to a (flavor, instances) pair; `${FLAVOR}` and `${INSTANCES}` are substituted in commands
   - WarpScript files read once at startup then cached; retry loop if a file is not yet available at launch
   - `${WARP_TOKEN}` and `${APP_ID}` substitution inside WarpScript files
   - Per-app optional `warp_token`; falls back to the `WARP_TOKEN` environment variable
@@ -257,8 +257,8 @@ instances  = {min = 1, max = 2}
 flavors    = ["S", "M"]
 scale_up_threshold   = {cpu = 70.0}
 scale_down_threshold = {cpu = 40.0}
-upscale_command   = "kubectl scale deployment myapp --replicas=${instances}"
-downscale_command = "kubectl scale deployment myapp --replicas=${instances}"
+upscale_command   = "kubectl scale deployment myapp --replicas=${INSTANCES}"
+downscale_command = "kubectl scale deployment myapp --replicas=${INSTANCES}"
 ```
 
 See `config.example.toml` for annotated healthcheck examples.
@@ -437,10 +437,10 @@ scale_up_threshold = {cpu = 70.0}
 # Scale DOWN if ALL of these values are below their threshold
 scale_down_threshold = {cpu = 40.0}
 
-# ${flavor} and ${instances} are substituted from the computed level
+# ${FLAVOR} and ${INSTANCES} are substituted from the computed level
 # ${APP_ID} is substituted if apps are configured
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
 ```
 
 #### Level Computation
@@ -459,7 +459,7 @@ Levels are derived automatically from `flavors` and `instances`. There is no exp
 | `["S"]` | `min=1, max=3` | 3 levels: (S,1) → (S,2) → (S,3) |
 | `["S","M"]` | `min=1` (no max) | 2 levels: (S,1) → (M,1) — no instance scaling |
 
-At level N, the `${flavor}` and `${instances}` placeholders in commands resolve to the corresponding computed values.
+At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve to the corresponding computed values.
 
 #### Probe Parameters
 
@@ -528,10 +528,21 @@ The following placeholders are substituted in `upscale_command` and `downscale_c
 | Placeholder | Replaced with |
 |-------------|---------------|
 | `${APP_ID}` | The app identifier (only when `apps` is configured) |
-| `${flavor}` | The flavor name at the **current** level (upscale) or **target** level (downscale) |
-| `${instances}` | The instance count at the **current** level (upscale) or **target** level (downscale) |
+| `${FLAVOR}` | The flavor name at the **current** level (upscale) or **target** level (downscale) |
+| `${INSTANCES}` | The instance count at the **current** level (upscale) or **target** level (downscale) |
 
 For `on_failure_command`, only `${APP_ID}` is substituted.
+
+#### Scaling Decision Logic
+
+Each cycle, after collecting metric values, the probe evaluates:
+
+| Direction | Condition | Logic |
+|-----------|-----------|-------|
+| **Scale UP** | Any metric value > its `scale_up_threshold` | **OR** — one metric suffices |
+| **Scale DOWN** | All metric values < their `scale_down_threshold` | **AND** — every metric must qualify |
+
+With a single metric configured, both directions reduce to a simple threshold comparison.
 
 #### Multi-Metric Example
 
@@ -551,8 +562,8 @@ scale_up_threshold = {cpu = 70.0, memory = 80.0}
 # Scale DOWN only if BOTH cpu < 40% AND memory < 50%
 scale_down_threshold = {cpu = 40.0, memory = 50.0}
 
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
 ```
 
 #### WarpScript File Format
@@ -620,7 +631,7 @@ on_failure_command = "clever scale --app ${APP_ID} --flavor S && clever restart 
 on_failure_command = "echo 'Alert' | mail -s 'App down' ops@example.com"
 ```
 
-`${APP_ID}` is substituted before the command is passed to the shell. In scaling commands, `${flavor}` and `${instances}` are also substituted.
+`${APP_ID}` is substituted before the command is passed to the shell. In scaling commands, `${FLAVOR}` and `${INSTANCES}` are also substituted.
 
 ### Timeout and Process Group Cleanup
 
@@ -828,7 +839,7 @@ Observe that:
 | `Failed to read WarpScript file, will retry` | File not found or permission error; the probe retries every `interval_seconds` |
 | WarpScript changes not reflected | The script is read once at startup; restart the application after editing the `.mc2` file |
 | Scaling level reset to minimum after restart | The previously persisted level is not in the current config; expected behaviour after reducing `flavors` or `instances.max` |
-| `${flavor}` / `${instances}` not substituted in command | Verify the placeholders are spelled exactly as shown; only `upscale_command` and `downscale_command` receive these substitutions |
+| `${FLAVOR}` / `${INSTANCES}` not substituted in command | Verify the placeholders are spelled exactly as shown; only `upscale_command` and `downscale_command` receive these substitutions |
 | Two instances diverge on `current_level` | Expected without Redis; with Redis and `--multi-instance`, state is synced after each lock acquisition — check logs for `State refreshed from Redis` |
 | Command times out but child processes keep running | Should not happen on Linux/macOS — the whole process group is killed. On other platforms, only `sh` is killed. |
 | `Redis URL provided but redis-persistence feature is not enabled` | Rebuild with `cargo build --features redis-persistence` |
@@ -843,7 +854,7 @@ Observe that:
 
 - **Privileges**: commands execute with the same OS privileges as the application. Consider running as a dedicated low-privilege user.
 - **`${APP_ID}` validation**: app IDs are validated at startup — only alphanumeric characters, `-`, `_`, and `.` are allowed. This prevents shell injection via the `${APP_ID}` placeholder.
-- **`${flavor}` and `${instances}`**: these are derived from the TOML config (flavor strings and integer counts), not from external inputs, so they do not introduce injection risk.
+- **`${FLAVOR}` and `${INSTANCES}`**: these are derived from the TOML config (flavor strings and integer counts), not from external inputs, so they do not introduce injection risk.
 - **Shell execution surface**: all commands are run via `sh -c` to support pipes and shell operators. The **content** of `on_failure_command`, `upscale_command`, and `downscale_command` is not otherwise validated and is the responsibility of the administrator who writes the configuration file. Only trusted administrators should have write access to the TOML file.
 - **Tokens in configuration**: prefer the `WARP_TOKEN` environment variable over inline `warp_token` values in the TOML file. Environment variables are not stored on disk and are less likely to be accidentally committed to version control or exposed in file system backups.
 - **Command logging**: command strings are only logged at `debug` level, as they may contain tokens or passwords. Run with `RUST_LOG=info` (the default) in production to avoid exposing them.

@@ -274,9 +274,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Shutdown signal received, terminating...");
 
-    for handle in handles {
+    for handle in &handles {
         handle.abort();
     }
+    for handle in handles {
+        let _ = handle.await;
+    }
 
+    info!("All tasks terminated");
     Ok(())
 }

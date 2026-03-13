@@ -31,8 +31,8 @@
 #
 # Command substitution (upscale_command / downscale_command):
 #   ${APP_ID}   → app identifier (only when apps are configured)
-#   ${flavor}   → flavor name at the target level
-#   ${instances}→ instance count at the target level
+#   ${FLAVOR}   → flavor name at the target level
+#   ${INSTANCES}→ instance count at the target level
 
 # ---------------------------------------------------------------------------
 # Example 1: Single metric, flavor + instance scaling, multiple apps
@@ -63,9 +63,9 @@ scale_up_threshold = {cpu = 70.0}
 # Scale DOWN if cpu < 40%
 scale_down_threshold = {cpu = 40.0}
 
-# ${flavor} and ${instances} resolve to the computed level values
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+# ${FLAVOR} and ${INSTANCES} resolve to the computed level values
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
 
 # ---------------------------------------------------------------------------
 # Example 2: Multi-metric scaling (OR for up, AND for down)
@@ -94,8 +94,8 @@ scale_up_threshold = {cpu = 70.0, memory = 80.0}
 # Scale DOWN only if BOTH cpu < 40% AND memory < 50%  (ALL logic)
 scale_down_threshold = {cpu = 40.0, memory = 50.0}
 
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --instances ${instances}"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --instances ${INSTANCES}"
 
 # ---------------------------------------------------------------------------
 # Example 3: Instance-only scaling (single flavor)
@@ -113,8 +113,8 @@ flavors   = ["M"]
 scale_up_threshold   = {rps = 100.0}   # > 100 req/s → scale up
 scale_down_threshold = {rps = 60.0}    # < 60 req/s  → scale down
 
-upscale_command   = "kubectl scale deployment api --replicas=${instances}"
-downscale_command = "kubectl scale deployment api --replicas=${instances}"
+upscale_command   = "kubectl scale deployment api --replicas=${INSTANCES}"
+downscale_command = "kubectl scale deployment api --replicas=${INSTANCES}"
 
 # ---------------------------------------------------------------------------
 # Example 4: Flavor-only scaling (fixed instance count)
@@ -132,8 +132,8 @@ flavors   = ["XS", "S", "M", "L"]   # 4 levels, always 2 instances
 scale_up_threshold   = {cpu = 65.0}
 scale_down_threshold = {cpu = 35.0}
 
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances 2"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances 2"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --min-instances 2"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --min-instances 2"
 
 # ---------------------------------------------------------------------------
 # Example 5: on_failure_command with configurable retry and delays
@@ -171,5 +171,5 @@ flavors   = ["S", "M"]
 scale_up_threshold   = {cpu = 70.0}
 scale_down_threshold = {cpu = 45.0}
 
-upscale_command   = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances ${instances}"
-downscale_command = "clever scale --app ${APP_ID} --flavor ${flavor} --min-instances ${instances}"
+upscale_command   = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --min-instances ${INSTANCES}"
+downscale_command = "clever scale --app ${APP_ID} --flavor ${FLAVOR} --min-instances ${INSTANCES}"

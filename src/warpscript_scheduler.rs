@@ -4,7 +4,6 @@ use crate::persistence::{self, PersistenceBackend, WarpScriptProbeState};
 use crate::warpscript_probe;
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
@@ -12,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 /// Execute a scaling command with variable substitution.
 ///
-/// Substitutes `${APP_ID}`, `${flavor}`, and `${instances}` in the command string.
+/// Substitutes `${APP_ID}`, `${FLAVOR}`, and `${INSTANCES}` in the command string.
 /// Returns `true` if the command succeeded, `false` otherwise.
 pub(crate) async fn execute_scaling_command(
     probe_name: &str,
@@ -27,8 +26,8 @@ pub(crate) async fn execute_scaling_command(
     if let Some(id) = app_id {
         cmd = cmd.replace("${APP_ID}", id);
     }
-    cmd = cmd.replace("${flavor}", flavor);
-    cmd = cmd.replace("${instances}", &instances.to_string());
+    cmd = cmd.replace("${FLAVOR}", flavor);
+    cmd = cmd.replace("${INSTANCES}", &instances.to_string());
 
     warn!(probe_name = %probe_name, action = %action, "Executing {} command", action);
     debug!(command = %cmd, "Scaling command detail");
@@ -167,7 +166,7 @@ pub async fn schedule_warpscript_probe(
         let mut loaded: HashMap<String, String> = HashMap::new();
         let mut all_ok = true;
         for (metric, path) in &probe.warpscript_files {
-            match fs::read_to_string(path) {
+            match tokio::fs::read_to_string(path).await {
                 Ok(content) => {
                     loaded.insert(metric.clone(), content);
                 }
@@ -564,7 +563,7 @@ mod tests {
         // Use echo to capture substituted values; check exit code (always 0)
         let ok = execute_scaling_command(
             "test",
-            "echo ${flavor} ${instances}",
+            "echo ${FLAVOR} ${INSTANCES}",
             Some("myapp"),
             "XL",
             3,
