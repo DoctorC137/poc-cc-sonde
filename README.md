@@ -852,6 +852,7 @@ Log format:
 | Remediation actions (threshold reached, scaling detected, commands executed) | `warn` | Visible with `RUST_LOG=warn` |
 | Command exit codes on non-zero | `warn` | |
 | Command stderr (on non-zero exit) | `warn` | |
+| WarpScript HTTP errors (non-2xx, timeout, …) | `error` | Emitted once by the scheduler with `metric=` field; the probe returns an `Err` without logging |
 | `WARP_ENDPOINT` value | `debug` | Not emitted at `info` |
 | Command strings | `debug` | May contain tokens or passwords |
 | Per-execution scheduling details | `debug` | |
@@ -875,7 +876,7 @@ cargo test --features redis-persistence
 ```
 
 ```bash
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 ### Manual Multi-Instance Test

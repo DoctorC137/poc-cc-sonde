@@ -10,20 +10,34 @@ use tokio::task::JoinSet;
 use tokio::time;
 use tracing::{debug, error, info, warn};
 
+pub(crate) struct ScalingCommandArgs<'a> {
+    pub probe_name: &'a str,
+    pub command: &'a str,
+    pub app_id: Option<&'a str>,
+    pub flavor: &'a str,
+    pub instances: u32,
+    pub timeout_seconds: u64,
+    /// `"upscale"` or `"downscale"`
+    pub action: &'a str,
+    pub log_output: bool,
+}
+
 /// Execute a scaling command with variable substitution.
 ///
 /// Substitutes `${APP_ID}`, `${FLAVOR}`, and `${INSTANCES}` in the command string.
 /// Returns `true` if the command succeeded, `false` otherwise.
-pub(crate) async fn execute_scaling_command(
-    probe_name: &str,
-    command: &str,
-    app_id: Option<&str>,
-    flavor: &str,
-    instances: u32,
-    timeout_seconds: u64,
-    action: &str, // "upscale" or "downscale"
-    log_output: bool,
-) -> bool {
+pub(crate) async fn execute_scaling_command(args: ScalingCommandArgs<'_>) -> bool {
+    let ScalingCommandArgs {
+        probe_name,
+        command,
+        app_id,
+        flavor,
+        instances,
+        timeout_seconds,
+        action,
+        log_output,
+    } = args;
+
     let mut cmd = command.to_string();
     if let Some(id) = app_id {
         cmd = cmd.replace("${APP_ID}", id);
@@ -554,16 +568,16 @@ pub async fn schedule_warpscript_probe(
                         debug!(command = %cmd, "DRY RUN command detail");
                         true
                     } else {
-                        execute_scaling_command(
-                            &probe.name,
-                            cmd,
+                        execute_scaling_command(ScalingCommandArgs {
+                            probe_name: &probe.name,
+                            command: cmd,
                             app_id,
-                            "",
-                            0,
-                            probe.command_timeout_seconds,
-                            "upscale",
-                            !probe.suppress_command_output,
-                        )
+                            flavor: "",
+                            instances: 0,
+                            timeout_seconds: probe.command_timeout_seconds,
+                            action: "upscale",
+                            log_output: !probe.suppress_command_output,
+                        })
                         .await
                     }
                 } else {
@@ -587,16 +601,16 @@ pub async fn schedule_warpscript_probe(
                         debug!(command = %cmd, "DRY RUN command detail");
                         true
                     } else {
-                        execute_scaling_command(
-                            &probe.name,
-                            cmd,
+                        execute_scaling_command(ScalingCommandArgs {
+                            probe_name: &probe.name,
+                            command: cmd,
                             app_id,
-                            &computed.flavor,
-                            computed.instances,
-                            probe.command_timeout_seconds,
-                            "upscale",
-                            !probe.suppress_command_output,
-                        )
+                            flavor: &computed.flavor,
+                            instances: computed.instances,
+                            timeout_seconds: probe.command_timeout_seconds,
+                            action: "upscale",
+                            log_output: !probe.suppress_command_output,
+                        })
                         .await
                     }
                 };
@@ -640,16 +654,16 @@ pub async fn schedule_warpscript_probe(
                         debug!(command = %cmd, "DRY RUN command detail");
                         true
                     } else {
-                        execute_scaling_command(
-                            &probe.name,
-                            cmd,
+                        execute_scaling_command(ScalingCommandArgs {
+                            probe_name: &probe.name,
+                            command: cmd,
                             app_id,
-                            "",
-                            0,
-                            probe.command_timeout_seconds,
-                            "downscale",
-                            !probe.suppress_command_output,
-                        )
+                            flavor: "",
+                            instances: 0,
+                            timeout_seconds: probe.command_timeout_seconds,
+                            action: "downscale",
+                            log_output: !probe.suppress_command_output,
+                        })
                         .await
                     }
                 } else {
@@ -673,16 +687,16 @@ pub async fn schedule_warpscript_probe(
                         debug!(command = %cmd, "DRY RUN command detail");
                         true
                     } else {
-                        execute_scaling_command(
-                            &probe.name,
-                            cmd,
+                        execute_scaling_command(ScalingCommandArgs {
+                            probe_name: &probe.name,
+                            command: cmd,
                             app_id,
-                            &computed.flavor,
-                            computed.instances,
-                            probe.command_timeout_seconds,
-                            "downscale",
-                            !probe.suppress_command_output,
-                        )
+                            flavor: &computed.flavor,
+                            instances: computed.instances,
+                            timeout_seconds: probe.command_timeout_seconds,
+                            action: "downscale",
+                            log_output: !probe.suppress_command_output,
+                        })
                         .await
                     }
                 };
@@ -758,35 +772,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_scaling_command_failure_returns_false() {
-        let ok = execute_scaling_command("test", "exit 1", None, "S", 1, 5, "upscale", true).await;
+        let ok = execute_scaling_command(ScalingCommandArgs {
+            probe_name: "test",
+            command: "exit 1",
+            app_id: None,
+            flavor: "S",
+            instances: 1,
+            timeout_seconds: 5,
+            action: "upscale",
+            log_output: true,
+        })
+        .await;
         assert!(!ok);
     }
 
     #[tokio::test]
     async fn test_scaling_command_success_returns_true() {
-        let ok = execute_scaling_command("test", "true", None, "S", 1, 5, "upscale", true).await;
+        let ok = execute_scaling_command(ScalingCommandArgs {
+            probe_name: "test",
+            command: "true",
+            app_id: None,
+            flavor: "S",
+            instances: 1,
+            timeout_seconds: 5,
+            action: "upscale",
+            log_output: true,
+        })
+        .await;
         assert!(ok);
     }
 
     #[tokio::test]
     async fn test_scaling_command_spawn_error_returns_false() {
-        let ok = execute_scaling_command("test", "nonexistent_xyz_cmd_42", None, "S", 1, 5, "upscale", true).await;
+        let ok = execute_scaling_command(ScalingCommandArgs {
+            probe_name: "test",
+            command: "nonexistent_xyz_cmd_42",
+            app_id: None,
+            flavor: "S",
+            instances: 1,
+            timeout_seconds: 5,
+            action: "upscale",
+            log_output: true,
+        })
+        .await;
         assert!(!ok);
     }
 
     #[tokio::test]
     async fn test_scaling_command_substitutes_flavor_and_instances() {
         // Use echo to capture substituted values; check exit code (always 0)
-        let ok = execute_scaling_command(
-            "test",
-            "echo ${FLAVOR} ${INSTANCES}",
-            Some("myapp"),
-            "XL",
-            3,
-            5,
-            "upscale",
-            true,
-        )
+        let ok = execute_scaling_command(ScalingCommandArgs {
+            probe_name: "test",
+            command: "echo ${FLAVOR} ${INSTANCES}",
+            app_id: Some("myapp"),
+            flavor: "XL",
+            instances: 3,
+            timeout_seconds: 5,
+            action: "upscale",
+            log_output: true,
+        })
         .await;
         assert!(ok);
     }

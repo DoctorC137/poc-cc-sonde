@@ -1,5 +1,5 @@
 use reqwest::Client;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Maximum bytes read from a WarpScript response body (1 MiB).
 const MAX_WARP_BODY_BYTES: usize = 1024 * 1024;
@@ -96,12 +96,6 @@ pub async fn execute_warpscript(
         };
         // Redact token from error body before logging (Warp may echo the submitted script)
         let safe_body = error_body.replace(token, "****");
-        error!(
-            probe_name = %probe_name,
-            status = %status,
-            error = %safe_body,
-            "WarpScript execution failed"
-        );
         return Err(WarpScriptError::RequestError(format!(
             "HTTP {}: {}",
             status, safe_body

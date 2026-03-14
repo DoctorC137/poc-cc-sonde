@@ -108,25 +108,23 @@ pub async fn execute_command(
         if log_output {
             info!(exit_code = exit_code, "Command executed successfully");
         }
-    } else {
-        if log_output {
-            // stderr only — stdout may contain sensitive data.
-            // Cap at MAX_STDERR_LOG_BYTES to prevent log flooding.
-            const MAX_STDERR_LOG_BYTES: usize = 512;
-            let stderr_raw = &output.stderr;
-            let capped = if stderr_raw.len() > MAX_STDERR_LOG_BYTES {
-                &stderr_raw[..MAX_STDERR_LOG_BYTES]
-            } else {
-                stderr_raw.as_slice()
-            };
-            let stderr = String::from_utf8_lossy(capped);
-            warn!(
-                exit_code = exit_code,
-                stderr = %stderr.trim(),
-                stderr_truncated = output.stderr.len() > MAX_STDERR_LOG_BYTES,
-                "Command executed with non-zero exit code"
-            );
-        }
+    } else if log_output {
+        // stderr only — stdout may contain sensitive data.
+        // Cap at MAX_STDERR_LOG_BYTES to prevent log flooding.
+        const MAX_STDERR_LOG_BYTES: usize = 512;
+        let stderr_raw = &output.stderr;
+        let capped = if stderr_raw.len() > MAX_STDERR_LOG_BYTES {
+            &stderr_raw[..MAX_STDERR_LOG_BYTES]
+        } else {
+            stderr_raw.as_slice()
+        };
+        let stderr = String::from_utf8_lossy(capped);
+        warn!(
+            exit_code = exit_code,
+            stderr = %stderr.trim(),
+            stderr_truncated = output.stderr.len() > MAX_STDERR_LOG_BYTES,
+            "Command executed with non-zero exit code"
+        );
     }
 
     Ok(output)
