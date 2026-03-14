@@ -568,7 +568,7 @@ At level N, the `${FLAVOR}` and `${INSTANCES}` placeholders in commands resolve 
    - Otherwise → no action, wait `interval_seconds`
 7. Boundaries (level-based only): upscale is ignored at max level; downscale is ignored at min level (level 1). In stateless mode there are no level bounds.
 8. After a scaling action the **directional cooldown matrix** takes effect: `delay_after_upscale` / `delay_after_downscale` each carry an `upscale` and a `downscale` field, independently blocking the two directions. The probe waits for the minimum of the two active timers; if only one direction is blocked the other can still proceed at the next cycle. Both timers fall back to `delay_after_scale_seconds`, then to `interval_seconds`, for any absent field.
-9. On WarpScript execution error, the current level is kept and the consecutive failure counter is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed.
+9. On WarpScript execution error (probe failure), the current level is kept and `consecutive_failures` is incremented. If `on_failure_command` is set and `consecutive_failures > failure_retries_before_command`, the command is executed. If a **scaling command** (upscale/downscale) fails, `consecutive_scaling_failures` is incremented and logged, but `on_failure_command` is **not** triggered — the probe simply waits `interval_seconds` before the next cycle.
 10. (Level-based only) The current level is persisted and restored on restart. If the persisted level is no longer valid in the current config (e.g., `flavors` was shortened), it is clamped to level 1 and a `WARN` is logged.
 
 #### Token Resolution

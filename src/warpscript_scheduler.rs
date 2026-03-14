@@ -618,50 +618,7 @@ pub async fn schedule_warpscript_probe(
                         consecutive_scaling_failures,
                         "Scaling command failed — level not updated"
                     );
-                    let threshold = probe.get_failure_retries_before_command();
-                    if consecutive_scaling_failures > threshold {
-                        if let Some(ref command) = probe.on_failure_command {
-                            let cmd = if let Some(id) = app_id {
-                                command.replace("${APP_ID}", id)
-                            } else {
-                                command.clone()
-                            };
-                            warn!(
-                                probe_name = %probe.name,
-                                consecutive_scaling_failures,
-                                threshold,
-                                "Scaling failure threshold reached, executing on_failure_command"
-                            );
-                            if dry_run {
-                                warn!(probe_name = %probe.name,
-                                      "DRY RUN: skipping on_failure_command after scaling failure");
-                                debug!(command = %cmd, "DRY RUN command detail");
-                                next_delay = probe.get_delay_after_onf_command_success();
-                            } else {
-                                match executor::execute_command(&cmd, probe.command_timeout_seconds, !probe.suppress_command_output).await {
-                                    Ok(output) if output.status.success() => {
-                                        warn!(probe_name = %probe.name,
-                                              "on_failure_command after scaling failure completed successfully");
-                                        next_delay = probe.get_delay_after_onf_command_success();
-                                    }
-                                    Ok(_) => {
-                                        error!(probe_name = %probe.name,
-                                               "on_failure_command after scaling failure completed with errors");
-                                        next_delay = probe.get_delay_after_onf_command_failure();
-                                    }
-                                    Err(e) => {
-                                        error!(probe_name = %probe.name, error = %e,
-                                               "Failed to execute on_failure_command after scaling failure");
-                                        next_delay = probe.get_delay_after_onf_command_failure();
-                                    }
-                                }
-                            }
-                        } else {
-                            next_delay = probe.interval_seconds;
-                        }
-                    } else {
-                        next_delay = probe.interval_seconds;
-                    }
+                    next_delay = probe.interval_seconds;
                 }
             }
         } else if probe.should_scale_down(current_level, &metric_values) {
@@ -747,50 +704,7 @@ pub async fn schedule_warpscript_probe(
                         consecutive_scaling_failures,
                         "Scaling command failed — level not updated"
                     );
-                    let threshold = probe.get_failure_retries_before_command();
-                    if consecutive_scaling_failures > threshold {
-                        if let Some(ref command) = probe.on_failure_command {
-                            let cmd = if let Some(id) = app_id {
-                                command.replace("${APP_ID}", id)
-                            } else {
-                                command.clone()
-                            };
-                            warn!(
-                                probe_name = %probe.name,
-                                consecutive_scaling_failures,
-                                threshold,
-                                "Scaling failure threshold reached, executing on_failure_command"
-                            );
-                            if dry_run {
-                                warn!(probe_name = %probe.name,
-                                      "DRY RUN: skipping on_failure_command after scaling failure");
-                                debug!(command = %cmd, "DRY RUN command detail");
-                                next_delay = probe.get_delay_after_onf_command_success();
-                            } else {
-                                match executor::execute_command(&cmd, probe.command_timeout_seconds, !probe.suppress_command_output).await {
-                                    Ok(output) if output.status.success() => {
-                                        warn!(probe_name = %probe.name,
-                                              "on_failure_command after scaling failure completed successfully");
-                                        next_delay = probe.get_delay_after_onf_command_success();
-                                    }
-                                    Ok(_) => {
-                                        error!(probe_name = %probe.name,
-                                               "on_failure_command after scaling failure completed with errors");
-                                        next_delay = probe.get_delay_after_onf_command_failure();
-                                    }
-                                    Err(e) => {
-                                        error!(probe_name = %probe.name, error = %e,
-                                               "Failed to execute on_failure_command after scaling failure");
-                                        next_delay = probe.get_delay_after_onf_command_failure();
-                                    }
-                                }
-                            }
-                        } else {
-                            next_delay = probe.interval_seconds;
-                        }
-                    } else {
-                        next_delay = probe.interval_seconds;
-                    }
+                    next_delay = probe.interval_seconds;
                 }
             }
         } else {
