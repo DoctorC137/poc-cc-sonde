@@ -1,0 +1,36 @@
+# cc-sonde — monitoring des apps Clever Cloud de l'orga B.M. CC Demo
+# Probe unique appliqué à toutes les apps via la section [[healthcheck_probes.apps]]
+# En cas d'échec répété : restart automatique de l'app concernée
+
+[[healthcheck_probes]]
+name = "CC Orga Monitor"
+interval_seconds = 60
+on_failure_command = "clever restart --app ${APP_ID} --org orga_99543bee-f814-43f6-a8f8-3dcb2a1bd4fa"
+failure_retries_before_command = 2
+request_timeout_seconds = 15
+delay_after_success_seconds = 60
+delay_after_failure_seconds = 20
+delay_after_command_success_seconds = 120
+
+[healthcheck_probes.checks]
+expected_status = 200
+
+# B.M. TP-Clever (PHP)
+[[healthcheck_probes.apps]]
+id = "app_4b20da37-de5d-41d3-b462-59d159ee3a5a"
+url = "https://app-4b20da37-de5d-41d3-b462-59d159ee3a5a.cleverapps.io/"
+
+# cc-scheduler (Rust)
+[[healthcheck_probes.apps]]
+id = "app_4c5caaed-c50b-4eb2-b269-1bda5c4e51af"
+url = "https://app-4c5caaed-c50b-4eb2-b269-1bda5c4e51af.cleverapps.io/"
+
+# Deploiement Test Vinext (Node)
+[[healthcheck_probes.apps]]
+id = "app_0575225d-7864-435d-80eb-39f2a78299d3"
+url = "https://app-0575225d-7864-435d-80eb-39f2a78299d3.cleverapps.io/"
+
+# WordPress-Bedrock-Example demo (PHP)
+[[healthcheck_probes.apps]]
+id = "app_d5e96315-863a-42c7-b743-af22eba3d4e3"
+url = "https://app-d5e96315-863a-42c7-b743-af22eba3d4e3.cleverapps.io/"
