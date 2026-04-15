@@ -1,0 +1,41 @@
+name: Refresh Warp 10 token
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # tous les jours à 5h UTC (token valide ~5 jours)
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install clever-tools
+        run: |
+          curl -sL https://github.com/CleverCloud/clever-tools/releases/download/4.8.0/clever-tools-4.8.0_linux.tar.gz \
+            -o /tmp/ct.tar.gz
+          tar -xzf /tmp/ct.tar.gz -C /tmp
+          sudo install -m755 /tmp/clever-tools-4.8.0/clever /usr/local/bin/clever
+
+      - name: Authenticate clever CLI
+        env:
+          CLEVER_TOKEN: ${{ secrets.CLEVER_TOKEN }}
+          CLEVER_SECRET: ${{ secrets.CLEVER_SECRET }}
+        run: clever profile
+
+      - name: Fetch fresh Warp 10 read token
+        env:
+          CLEVER_TOKEN: ${{ secrets.CLEVER_TOKEN }}
+          CLEVER_SECRET: ${{ secrets.CLEVER_SECRET }}
+        run: |
+          WARP_TOKEN=$(clever curl \
+            "https://api.clever-cloud.com/v2/w10tokens/metrics/read/orga_99543bee-f814-43f6-a8f8-3dcb2a1bd4fa" \
+            2>/dev/null | tail -1 | tr -d '[:space:]')
+          echo "WARP_TOKEN=$WARP_TOKEN" >> $GITHUB_ENV
+
+      - name: Update WARP_TOKEN on poc-cc-sonde
+        env:
+          CLEVER_TOKEN: ${{ secrets.CLEVER_TOKEN }}
+          CLEVER_SECRET: ${{ secrets.CLEVER_SECRET }}
+        run: |
+          clever env set WARP_TOKEN "$WARP_TOKEN" \
+            --app app_c11cde99-913d-4f28-b3be-d7cf36fa4bc0
