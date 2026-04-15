@@ -1,0 +1,26 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # tous les jours à 6h UTC
+  workflow_dispatch:        # déclenchement manuel possible
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream and merge
+        run: |
+          git remote add upstream https://github.com/CleverCloud/poc-cc-sonde.git
+          git fetch upstream
+          git checkout master
+          git merge upstream/master --ff-only || git merge upstream/master --no-edit
+          git push origin master
