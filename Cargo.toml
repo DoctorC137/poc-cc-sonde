@@ -1,0 +1,30 @@
+[package]
+name = "cc-sonde"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.42", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1.11"
+clap = { version = "4.5", features = ["derive", "env"] }
+percent-encoding = "2"
+hyper = { version = "0.14", features = ["server", "http1", "tcp"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+serde_json = "1.0"
+async-trait = "0.1"
+
+[features]
+default = []
+redis-persistence = ["redis", "uuid"]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+mockito = "1.6"

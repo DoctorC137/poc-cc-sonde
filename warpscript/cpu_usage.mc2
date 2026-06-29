@@ -1,0 +1,23 @@
+'${WARP_TOKEN}' 'token' STORE
+'${APP_ID}' 'app' STORE
+
+NOW 'NOW' STORE
+
+2 m  'WIN'   STORE     // fenêtre courte = instances non up disparaissent
+1 m  'STEP'  STORE
+
+[ $token 'cpu.usage_idle'
+  { 'app_id' $app }
+  $NOW $WIN
+] FETCH
+
+[ SWAP bucketizer.last $NOW $STEP 0 ] BUCKETIZE
+
+[ SWAP [ 'app_id' ] reducer.mean ] REDUCE
+
+DUP SIZE 0 == <% DROP 'cpu: no data available yet' MSGFAIL %> IFT
+0 GET
+VALUES
+DUP SIZE 0 == <% DROP 'cpu: no values in time window' MSGFAIL %> IFT
+DUP SIZE 1 - GET
+100 SWAP -

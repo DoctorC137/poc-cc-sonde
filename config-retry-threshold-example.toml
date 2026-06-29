@@ -1,0 +1,63 @@
+# Example configuration demonstrating the failure retry threshold feature
+# This shows how to retry failed checks multiple times before executing the failure command
+
+# Example 1: Execute command immediately on first failure (default behavior)
+[[healthcheck_probes]]
+name = "Critical API - Immediate Alert"
+url = "https://httpbin.org/status/200"
+interval_seconds = 60
+delay_after_failure_seconds = 10  # Retry quickly
+failure_retries_before_command = 0  # Execute command on first failure (default)
+on_failure_command = "echo 'CRITICAL: API failed on first check!' | logger"
+
+[healthcheck_probes.checks]
+expected_status = 200
+
+# Example 2: Wait for 3 consecutive failures before alerting
+[[healthcheck_probes]]
+name = "API with Transient Issues"
+url = "https://httpbin.org/status/200"
+interval_seconds = 60
+delay_after_failure_seconds = 10  # Retry quickly (every 10 seconds)
+failure_retries_before_command = 3  # Only alert after 3 consecutive failures
+on_failure_command = "curl -X POST https://hooks.slack.com/... -d '{\"text\":\"API down for 30+ seconds\"}'"
+
+[healthcheck_probes.checks]
+expected_status = 200
+expected_body_contains = "ok"
+
+# Example 3: High tolerance - only alert after many failures
+[[healthcheck_probes]]
+name = "Database Health - High Tolerance"
+url = "https://httpbin.org/delay/1"
+interval_seconds = 30
+delay_after_failure_seconds = 5   # Quick retry (every 5 seconds)
+failure_retries_before_command = 10  # Only alert after 10 consecutive failures (~50 seconds)
+on_failure_command = "systemctl restart database-service && echo 'Database restarted' | mail -s 'DB Alert' admin@example.com"
+
+[healthcheck_probes.checks]
+expected_status = 200
+
+# Example 4: Gradual escalation strategy
+[[healthcheck_probes]]
+name = "Service with Escalation"
+url = "https://httpbin.org/get"
+interval_seconds = 60
+delay_after_failure_seconds = 15  # Retry every 15 seconds on failure
+failure_retries_before_command = 5  # Wait for 5 failures (~75 seconds) before acting
+on_failure_command = "echo 'Service down for over 1 minute - escalating' && /usr/local/bin/escalate-alert.sh"
+
+[healthcheck_probes.checks]
+expected_status = 200
+expected_body_contains = "httpbin"
+
+# Use cases:
+# - failure_retries_before_command = 0: Instant alerts (good for critical services)
+# - failure_retries_before_command = 3-5: Moderate tolerance (good for services with occasional hiccups)
+# - failure_retries_before_command = 10+: High tolerance (good for non-critical or flaky services)
+#
+# Benefits:
+# - Reduces false alerts from transient network issues
+# - Gives services time to self-recover
+# - Prevents command spam from repeated failures
+# - Allows different strategies per probe

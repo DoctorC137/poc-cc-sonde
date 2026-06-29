@@ -1,0 +1,112 @@
+# Example configuration file for POC Sonde
+# This file demonstrates various probe configurations
+
+# Example 1: Simple health check with status code verification
+[[healthcheck_probes]]
+name = "API Health Check"
+url = "https://httpbin.org/status/200"
+interval_seconds = 60
+# Optional: command to execute on failure
+on_failure_command = "echo 'API health check failed'"
+# Optional: timeout for command execution (default: 30 seconds)
+command_timeout_seconds = 30
+# Optional: delay after successful check (defaults to interval_seconds)
+delay_after_success_seconds = 120
+# Optional: delay after failed check for faster retry (defaults to interval_seconds)
+delay_after_failure_seconds = 10
+# Optional: number of consecutive failures before executing command (default: 0 = immediate)
+failure_retries_before_command = 3
+
+[healthcheck_probes.checks]
+# Check that the response status is 200
+expected_status = 200
+
+# Example 2: Check with body content validation
+[[healthcheck_probes]]
+name = "JSON API Check"
+url = "https://httpbin.org/json"
+interval_seconds = 30
+
+[healthcheck_probes.checks]
+expected_status = 200
+# Check that the response body contains this string
+expected_body_contains = "slideshow"
+
+# Example 3: Check with regex pattern matching
+[[healthcheck_probes]]
+name = "HTML Page Check"
+url = "https://httpbin.org/html"
+interval_seconds = 120
+
+[healthcheck_probes.checks]
+expected_status = 200
+# Check that the response body matches this regex pattern
+expected_body_regex = "<h1>.*</h1>"
+
+# Example 4: Check with header validation
+[[healthcheck_probes]]
+name = "Header Validation Check"
+url = "https://httpbin.org/response-headers?X-Custom-Header=test-value"
+interval_seconds = 45
+
+[healthcheck_probes.checks]
+expected_status = 200
+# Check that specific headers have expected values
+
+[healthcheck_probes.checks.expected_header]
+"X-Custom-Header" = "test-value"
+
+# Example 5: Combined checks (all must pass)
+[[healthcheck_probes]]
+name = "Comprehensive Check"
+url = "https://httpbin.org/get"
+interval_seconds = 90
+on_failure_command = "logger 'Comprehensive check failed for httpbin.org'"
+
+[healthcheck_probes.checks]
+expected_status = 200
+expected_body_contains = "httpbin.org"
+expected_body_regex = "\"url\":\\s*\"https://httpbin.org/get\""
+
+# Example 6: Simulated failure check (for testing)
+# Uncomment to test failure scenarios
+# [[healthcheck_probes]]
+# name = "Failure Test"
+# url = "https://httpbin.org/status/500"
+# interval_seconds = 30
+# on_failure_command = "echo 'Expected failure occurred' >> /tmp/probe-failures.log"
+#
+# [healthcheck_probes.checks]
+# expected_status = 200  # This will fail since the endpoint returns 500
+
+# ============================================================================
+# WarpScript Probes (requires WARP_ENDPOINT and WARP_TOKEN environment vars)
+# ============================================================================
+
+# Example 7: WarpScript-based auto-scaling probe
+# Uncomment to use (and set WARP_ENDPOINT and WARP_TOKEN env vars)
+# [[warpscript_probes]]
+# name = "CPU Auto-Scaler"
+# warpscript_file = "warpscript/cpu_usage.mc2"
+# interval_seconds = 60
+# delay_after_scale_seconds = 120
+#
+# # Level 1: Minimum (1 instance)
+# [[warpscript_probes.levels]]
+# level = 1
+# scale_up_threshold = 70.0
+# upscale_command = "kubectl scale deployment myapp --replicas=2"
+#
+# # Level 2: Medium (2 instances)
+# [[warpscript_probes.levels]]
+# level = 2
+# scale_up_threshold = 85.0
+# scale_down_threshold = 50.0
+# upscale_command = "kubectl scale deployment myapp --replicas=3"
+# downscale_command = "kubectl scale deployment myapp --replicas=1"
+#
+# # Level 3: Maximum (3 instances)
+# [[warpscript_probes.levels]]
+# level = 3
+# scale_down_threshold = 60.0
+# downscale_command = "kubectl scale deployment myapp --replicas=2"
